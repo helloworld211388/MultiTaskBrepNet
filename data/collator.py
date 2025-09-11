@@ -92,6 +92,7 @@ def pad_3d_unsqueeze(x, padlen1, padlen2, padlen3):
     return x.unsqueeze(0)
 
 
+
 def collator(items, multi_hop_max_dist, spatial_pos_max):
     # ======================= 在此插入最终的调试代码块 (开始) =======================
     # 在函数最开始，对原始的 item 对象列表进行图结构完整性检查
@@ -177,7 +178,9 @@ def collator(items, multi_hop_max_dist, spatial_pos_max):
             item.instance_pos_edge_index,
             item.instance_label,
             item.rational,
-            item.data_id
+            item.data_id,
+            item.EigVecs, # 新增 EigVecs
+            item.EigVals, # 新增 EigVals
         )
         for item in items
     ]
@@ -206,10 +209,14 @@ def collator(items, multi_hop_max_dist, spatial_pos_max):
         centroid_distances,
         edge_paths,
         label_features,
-        instance_pos_edge_indices,  # <-- 修正后的位置
-        instance_labels,  # <-- 修正后的位置
+        instance_pos_edge_indices,
+        instance_labels,
         rationals,
-        data_ids
+        data_ids,
+        # ======================= 修改点 2 (开始) =======================
+        EigVecs_list, # 新增 EigVecs 列表
+        EigVals_list, # 新增 EigVals 列表
+        # ======================= 修改点 2 (结束) =======================
     ) = zip(*items)
 
     for idx, _ in enumerate(attn_biases):
@@ -267,17 +274,13 @@ def collator(items, multi_hop_max_dist, spatial_pos_max):
     batched_instance_pos_edge_index_list = []
     node_offset = 0
     for i, pos_edge_index in enumerate(instance_pos_edge_indices):
-        # 仅在当前图存在正样本对时，才进行偏移并添加到列表中
         if pos_edge_index.numel() > 0:
             batched_instance_pos_edge_index_list.append(pos_edge_index + node_offset)
-        # 累加当前图的节点数，为下一个图的索引偏移做准备
         node_offset += node_datas[i].size(0)
 
-    # 如果整个批次都没有正样本对，则创建一个空的张量
     if not batched_instance_pos_edge_index_list:
         batched_instance_pos_edge_index = torch.empty((2, 0), dtype=torch.long)
     else:
-        # 否则，将所有偏移后的正样本对张量拼接起来
         batched_instance_pos_edge_index = torch.cat(batched_instance_pos_edge_index_list, dim=1)
 
     batched_graph = dgl.batch([i for i in graphs])
@@ -285,6 +288,13 @@ def collator(items, multi_hop_max_dist, spatial_pos_max):
     batched_instance_label = torch.cat([i for i in instance_labels])
     rational = torch.cat([i for i in rationals])
     data_ids = torch.tensor([i for i in data_ids])
+
+    # ======================= 修改点 3 (开始) =======================
+    # 拼接 EigVecs 和 EigVals
+    batched_EigVecs = torch.cat([i for i in EigVecs_list])
+    # 将 EigVals 堆叠，而不是拼接，以保留批次维度
+    batched_EigVals = torch.stack(EigVals_list, dim=0)  # 旧: torch.cat
+    # ======================= 修改点 3 (结束) =======================
 
 
     batch_data = dict(
@@ -317,10 +327,13 @@ def collator(items, multi_hop_max_dist, spatial_pos_max):
         instance_label=batched_instance_label,
         instance_pos_edge_index=batched_instance_pos_edge_index,
         rational=rational,
-        id=data_ids
+        id=data_ids,
+        # ======================= 修改点 4 (开始) =======================
+        EigVecs=batched_EigVecs, # 将拼接好的张量添加到字典中
+        EigVals=batched_EigVals, # 将拼接好的张量添加到字典中
+        # ======================= 修改点 4 (结束) =======================
     )
     return batch_data
-
 
 def collator_st(items, multi_hop_max_dist, spatial_pos_max):
     items_source_data = [item["source_data"] for item in items]

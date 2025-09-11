@@ -269,20 +269,19 @@ class BrepDataExtractor:
              face_is_rational[i]) = self._extract_face_attributes(i)
 
         # 2. 基于原始图结构计算拉普拉斯分解、距离和路径
-        # 构建一个临时的原始DGL图
-        src_nodes, dst_nodes = [], []
+        src_nodes_orig, dst_nodes_orig = [], []
         edge_idx_map = {}
         edge_counter = 0
         for u, v, data in self.nx_graph.edges(data=True):
-            src_nodes.extend([u, v])
-            dst_nodes.extend([v, u])
+            src_nodes_orig.extend([u, v])
+            dst_nodes_orig.extend([v, u])
             edge_original_idx = data['edge_idx']
             edge_idx_map[edge_original_idx] = edge_counter
             edge_counter += 1
 
-        original_dgl_graph = dgl.graph((torch.tensor(src_nodes), torch.tensor(dst_nodes)), num_nodes=num_nodes)
+        original_dgl_graph = dgl.graph((torch.tensor(src_nodes_orig), torch.tensor(dst_nodes_orig)),
+                                       num_nodes=num_nodes)
 
-        # 在原始图上进行计算
         EigVecs, EigVals = laplace_decomposition(original_dgl_graph, MAX_FREQS)
         spatial_pos, d2_dist, a3_dist, centroid_dist = self._extract_proximity_features()
         edge_path = self._extract_edge_paths(MAX_HOP_DISTANCE, edge_idx_map)
@@ -321,7 +320,9 @@ class BrepDataExtractor:
             edge_convs_real_list.append(edge_convs_i)
 
             for src, dst in [(u, v), (v, u)]:
-                full_g_edge_id = dgl_graph.edge_id(src, dst)
+                # --- 这里是错误修正的地方 ---
+                full_g_edge_id = dgl_graph.edge_ids(src, dst)
+                # -------------------------
                 dgl_graph.edata['x'][full_g_edge_id] = torch.from_numpy(edge_data_uv_i)
                 dgl_graph.edata['t'][full_g_edge_id] = torch.tensor(edge_types_i, dtype=torch.int32)
                 dgl_graph.edata['l'][full_g_edge_id] = torch.tensor(edge_lens_i, dtype=torch.float32)
@@ -329,7 +330,6 @@ class BrepDataExtractor:
                 dgl_graph.edata['c'][full_g_edge_id] = torch.tensor(edge_convs_i, dtype=torch.int32)
                 dgl_graph.edata['real'][full_g_edge_id] = 1
 
-        # 使用真实边的凹凸性信息计算邻接面统计数据
         adj_stats = self._extract_adj_face_stats(np.array(edge_convs_real_list))
         dgl_graph.ndata['adj_stats'] = torch.from_numpy(adj_stats)
 
