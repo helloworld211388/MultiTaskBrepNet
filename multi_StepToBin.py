@@ -250,6 +250,7 @@ class BrepDataExtractor:
             self.face_centroids[i, :] = [centroid.X(), centroid.Y(), centroid.Z()]
 
     def process(self, feature_labels, instance_labels):
+        # 1. 提取所有面的基本几何和拓扑属性
         num_nodes = len(self.faces)
         node_data_uv = np.zeros((num_nodes, UV_GRID_SIZE, UV_GRID_SIZE, 7), dtype=np.float32)
         face_types = np.zeros(num_nodes, dtype=np.int32)
@@ -259,45 +260,37 @@ class BrepDataExtractor:
         face_centroids_data = np.zeros((num_nodes, 3), dtype=np.float32)
         face_curvatures = np.zeros(num_nodes, dtype=np.int32)
         inner_loop_props = np.zeros((num_nodes, 2), dtype=np.int32)
-        # 【MFTReNet方案二】为'是否为有理NURBS'属性分配空间
         face_is_rational = np.zeros(num_nodes, dtype=np.int32)
 
         for i in range(num_nodes):
             (node_data_uv[i, ...], face_types[i], face_areas[i],
              face_loops[i], face_adjs[i], face_centroids_data[i, :],
              face_curvatures[i], inner_loop_props[i, :],
-             face_is_rational[i]) = self._extract_face_attributes(i)  # 解包新返回值
+             face_is_rational[i]) = self._extract_face_attributes(i)
 
-        num_edges_in_graph = self.nx_graph.number_of_edges()
+        # 2. 基于原始图结构计算拉普拉斯分解、距离和路径
+        # 构建一个临时的原始DGL图
         src_nodes, dst_nodes = [], []
-        edge_idx_map = {data['edge_idx']: new_idx for new_idx, (_, _, data) in
-                        enumerate(self.nx_graph.edges(data=True))}
-        # 【MFTReNet方案一】更新edge_data_uv的形状
-        edge_data_uv = np.zeros((num_edges_in_graph, UV_GRID_SIZE, 12), dtype=np.float32)
-        edge_types = np.zeros(num_edges_in_graph, dtype=np.int32)
-        edge_lens = np.zeros(num_edges_in_graph, dtype=np.float32)
-        edge_angs = np.zeros(num_edges_in_graph, dtype=np.float32)
-        edge_convs = np.zeros(num_edges_in_graph, dtype=np.int32)
-
+        edge_idx_map = {}
         edge_counter = 0
         for u, v, data in self.nx_graph.edges(data=True):
-            edge_original_idx = data['edge_idx']
             src_nodes.extend([u, v])
             dst_nodes.extend([v, u])
-            (edge_data_uv[edge_counter, ...], edge_types[edge_counter], edge_lens[edge_counter],
-             edge_angs[edge_counter], edge_convs[edge_counter]) = self._extract_edge_attributes(edge_original_idx, u, v)
+            edge_original_idx = data['edge_idx']
+            edge_idx_map[edge_original_idx] = edge_counter
             edge_counter += 1
 
-        edge_data_uv = np.repeat(edge_data_uv, 2, axis=0)
-        edge_types = np.repeat(edge_types, 2, axis=0)
-        edge_lens = np.repeat(edge_lens, 2, axis=0)
-        edge_angs = np.repeat(edge_angs, 2, axis=0)
-        edge_convs = np.repeat(edge_convs, 2, axis=0)
+        original_dgl_graph = dgl.graph((torch.tensor(src_nodes), torch.tensor(dst_nodes)), num_nodes=num_nodes)
 
-        adj_stats = self._extract_adj_face_stats(edge_convs)
+        # 在原始图上进行计算
+        EigVecs, EigVals = laplace_decomposition(original_dgl_graph, MAX_FREQS)
+        spatial_pos, d2_dist, a3_dist, centroid_dist = self._extract_proximity_features()
+        edge_path = self._extract_edge_paths(MAX_HOP_DISTANCE, edge_idx_map)
 
-        dgl_graph = dgl.graph((torch.tensor(src_nodes, dtype=torch.long), torch.tensor(dst_nodes, dtype=torch.long)),
-                              num_nodes=num_nodes)
+        # 3. 构建全连接图并填充所有特征
+        dgl_graph = dgl.from_networkx(nx.complete_graph(num_nodes))
+
+        # 填充节点特征
         dgl_graph.ndata['x'] = torch.from_numpy(node_data_uv)
         dgl_graph.ndata['z'] = torch.from_numpy(face_types)
         dgl_graph.ndata['y'] = torch.from_numpy(face_areas)
@@ -307,22 +300,40 @@ class BrepDataExtractor:
         dgl_graph.ndata['centroid'] = torch.from_numpy(face_centroids_data)
         dgl_graph.ndata['curvature'] = torch.from_numpy(face_curvatures)
         dgl_graph.ndata['inner_loops'] = torch.from_numpy(inner_loop_props)
-        dgl_graph.ndata['adj_stats'] = torch.from_numpy(adj_stats)
-        # 【MFTReNet方案二】将新属性添加到图中
         dgl_graph.ndata['rational'] = torch.from_numpy(face_is_rational)
         dgl_graph.ndata['i'] = torch.tensor(instance_labels, dtype=torch.int)
-        dgl_graph.edata['x'] = torch.from_numpy(edge_data_uv)
-        dgl_graph.edata['t'] = torch.from_numpy(edge_types)
-        dgl_graph.edata['l'] = torch.from_numpy(edge_lens)
-        dgl_graph.edata['a'] = torch.from_numpy(edge_angs)
-        dgl_graph.edata['c'] = torch.from_numpy(edge_convs)
 
-        spatial_pos, d2_dist, a3_dist, centroid_dist = self._extract_proximity_features()
-        edge_path = self._extract_edge_paths(MAX_HOP_DISTANCE, edge_idx_map)
+        # 初始化全连接图的边特征 (所有边默认为虚拟边 real=0)
+        num_full_edges = dgl_graph.number_of_edges()
+        dgl_graph.edata['x'] = torch.zeros((num_full_edges, UV_GRID_SIZE, 12), dtype=torch.float32)
+        dgl_graph.edata['t'] = torch.zeros(num_full_edges, dtype=torch.int32)
+        dgl_graph.edata['l'] = torch.zeros(num_full_edges, dtype=torch.float32)
+        dgl_graph.edata['a'] = torch.zeros(num_full_edges, dtype=torch.float32)
+        dgl_graph.edata['c'] = torch.zeros(num_full_edges, dtype=torch.int32)
+        dgl_graph.edata['real'] = torch.zeros(num_full_edges, dtype=torch.long)
 
-        # Laplacian decomposition
-        EigVecs, EigVals = laplace_decomposition(dgl_graph, MAX_FREQS)
+        # 遍历原始图的边，填充真实边的特征并将 'real' 标志设为1
+        edge_convs_real_list = []
+        for u, v, data in self.nx_graph.edges(data=True):
+            edge_original_idx = data['edge_idx']
+            (edge_data_uv_i, edge_types_i, edge_lens_i,
+             edge_angs_i, edge_convs_i) = self._extract_edge_attributes(edge_original_idx, u, v)
+            edge_convs_real_list.append(edge_convs_i)
 
+            for src, dst in [(u, v), (v, u)]:
+                full_g_edge_id = dgl_graph.edge_id(src, dst)
+                dgl_graph.edata['x'][full_g_edge_id] = torch.from_numpy(edge_data_uv_i)
+                dgl_graph.edata['t'][full_g_edge_id] = torch.tensor(edge_types_i, dtype=torch.int32)
+                dgl_graph.edata['l'][full_g_edge_id] = torch.tensor(edge_lens_i, dtype=torch.float32)
+                dgl_graph.edata['a'][full_g_edge_id] = torch.tensor(edge_angs_i, dtype=torch.float32)
+                dgl_graph.edata['c'][full_g_edge_id] = torch.tensor(edge_convs_i, dtype=torch.int32)
+                dgl_graph.edata['real'][full_g_edge_id] = 1
+
+        # 使用真实边的凹凸性信息计算邻接面统计数据
+        adj_stats = self._extract_adj_face_stats(np.array(edge_convs_real_list))
+        dgl_graph.ndata['adj_stats'] = torch.from_numpy(adj_stats)
+
+        # 4. 准备并返回图和标签
         graph_labels = {
             "spatial_pos": torch.from_numpy(spatial_pos).int(),
             "d2_distance": torch.from_numpy(d2_dist).float(),
@@ -432,15 +443,20 @@ class BrepDataExtractor:
         return np.array([num_concave_loops, num_convex_loops], dtype=np.int32)
 
     def _extract_adj_face_stats(self, edge_convs: np.ndarray) -> np.ndarray:
+
+        # 我们在 process 方法中重新计算它
         num_faces = len(self.faces)
         adj_stats = np.zeros((num_faces, NUM_ADJ_STATS), dtype=np.int32)
         edge_idx_counter = 0
+        # 注意：这里的迭代应该只针对真实边
         for u, v, _ in self.nx_graph.edges(data=True):
+            # edge_convs 数组现在应该只包含真实边的凹凸性信息
             conv_type = edge_convs[edge_idx_counter]
-            if conv_type in [1, 2]:
+            if conv_type in [1, 2]: # Concave or Convex
                 v_type = self.original_surface_types[v]
                 index_for_u = v_type * 2 + (conv_type - 1)
                 adj_stats[u, index_for_u] += 1
+
                 u_type = self.original_surface_types[u]
                 index_for_v = u_type * 2 + (conv_type - 1)
                 adj_stats[v, index_for_v] += 1

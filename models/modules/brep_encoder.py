@@ -40,6 +40,7 @@ class BrepEncoder(nn.Module):
             num_shared_layers: int = 4,
             num_semantic_layers: int = 3,
             num_instance_layers: int = 4,
+            gamma: float = 0.1,
             # 新增LPE相关参数
             lpe_dim: int = 32,
             lpe_n_heads: int = 4,
@@ -88,6 +89,7 @@ class BrepEncoder(nn.Module):
 
         self.graph_attn_bias = GraphAttnBias(
             dim_node=embedding_dim,
+            gamma=gamma,
             num_heads=num_attention_heads,
             num_spatial=num_spatial,
             num_edge_dis=num_edge_dis,
