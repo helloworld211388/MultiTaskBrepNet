@@ -67,7 +67,7 @@ from occwl.graph import face_adjacency
 from occwl.edge_data_extractor import EdgeDataExtractor
 from scipy import sparse as sp
 import torch.nn.functional as F
-
+import traceback
 # --- 论文中定义的常量 ---
 UV_GRID_SIZE = 5
 POINT_SAMPLES_FOR_D2_A3 = 512
@@ -82,35 +82,42 @@ MAX_FREQS = 10  # Define max_freqs for Laplacian decomposition
 
 
 def laplace_decomposition(g, max_freqs):
-    # Laplacian
-    n = g.number_of_nodes()
-    A = g.adjacency_matrix(scipy_fmt="csr").astype(float)
-    N = sp.diags(np.array(g.in_degrees()).clip(1) ** -0.5, dtype=float)
-    L = sp.eye(g.number_of_nodes()) - N * A * N
+    """
+    计算图拉普拉斯算子的特征分解。
+    此版本在分解失败时会向上抛出异常。
+    """
+    num_nodes = g.num_nodes()
+    if num_nodes == 0 or g.num_edges() == 0:
+        EigVals = torch.zeros(max_freqs, dtype=torch.float)
+        EigVecs = torch.zeros(num_nodes, max_freqs, dtype=torch.float)
+        return EigVecs, EigVals
 
-    # Eigenvectors with numpy
-    EigVals, EigVecs = np.linalg.eigh(L.toarray())
-    EigVals, EigVecs = EigVals[: max_freqs], EigVecs[
-        :, :max_freqs]  # Keep up to the maximum desired number of frequencies
+    A = g.adj_external(scipy_fmt="csr").astype(float)
 
-    # Normalize and pad EigenVectors
-    EigVecs = torch.from_numpy(EigVecs).float()
-    EigVecs = F.normalize(EigVecs, p=2, dim=1, eps=1e-12, out=None)
+    N = A.shape[0]
+    D = sp.diags(np.array(A.sum(axis=1)).flatten(), 0)
+    L = D - A
 
-    if n < max_freqs:
-        EigVecs = F.pad(EigVecs, (0, max_freqs - n), value=float('nan'))
+    EigVals = np.zeros(max_freqs)
+    EigVecs = np.zeros((N, max_freqs))
 
-    # Save eigenvalues and pad
-    EigVals = torch.from_numpy(np.sort(np.abs(np.real(
-        EigVals))))  # Abs value is taken because numpy sometimes computes the first eigenvalue approaching 0 from the negative
+    if N > 1:
+        # 动态调整k的值，确保 k < N-1
+        k = min(max_freqs, N - 2)
 
-    if n < max_freqs:
-        EigVals = F.pad(EigVals, (0, max_freqs - n), value=float('nan')).unsqueeze(0)
-    else:
-        EigVals = EigVals.unsqueeze(0)
+        if k > 0:
+            # 注意：我们将try...except块移除，让异常自然地向上抛出
+            # 如果 sp.linalg.eigs 失败，它会抛出 ArpackNoConvergence 异常
+            eigvals_raw, eigvecs_raw = sp.linalg.eigs(L, k=k, which='SR', tol=1e-2)
+            eigvals_raw, eigvecs_raw = eigvals_raw.real, eigvecs_raw.real
 
-    return EigVecs, EigVals
+            idx = eigvals_raw.argsort()
+            eigvals_raw, eigvecs_raw = eigvals_raw[idx], eigvecs_raw[:, idx]
 
+            EigVals[:k] = eigvals_raw
+            EigVecs[:, :k] = eigvecs_raw
+
+    return torch.from_numpy(EigVecs).float(), torch.from_numpy(EigVals).float()
 
 def normalize_shape(shape: TopoDS_Shape) -> TopoDS_Shape:
     """
@@ -607,53 +614,83 @@ def process_file(file_path, label_dir, output_dir, device):
     label_file = os.path.join(label_dir, filename_no_ext + ".json")
     output_file = os.path.join(output_dir, filename_no_ext + ".bin")
     try:
-        if not os.path.exists(label_file): return f"Skipped (no label): {basename}"
+        if not os.path.exists(label_file):
+            print(f"DEBUG: Skipping {basename} -> Reason: Label file not found at {label_file}")
+            return f"Skipped (no label): {basename}"
+
         reader = STEPControl_Reader()
         if reader.ReadFile(file_path) != 1: raise IOError(f"读取STEP文件失败: {file_path}")
         reader.TransferRoots()
         shape = reader.OneShape()
         if shape is None or shape.IsNull(): raise ValueError("从STEP文件中未能获取到有效的Shape。")
         shape = normalize_shape(shape)
+
         with open(label_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
         if 'cls' not in data or 'seg' not in data: raise ValueError(f"JSON文件 {label_file} 的格式不正确。")
+
         feature_labels_dict, instance_groups_list = data['cls'], data['seg']
         temp_face_explorer = TopExp_Explorer(shape, TopAbs_FACE)
         num_original_faces = 0
         while temp_face_explorer.More():
             num_original_faces += 1
             temp_face_explorer.Next()
+
         full_feature_labels = [0] * num_original_faces
         for face_idx_str, label in feature_labels_dict.items():
             face_idx = int(face_idx_str)
             if face_idx < num_original_faces: full_feature_labels[face_idx] = label
+
         extractor = BrepDataExtractor(shape, full_feature_labels, device=device)
         num_nodes_after_filtering = len(extractor.faces)
-        if num_nodes_after_filtering <= 1: return f"Skipped (trivial graph with {num_nodes_after_filtering} nodes): {basename}"
-        if extractor.nx_graph.number_of_edges() == 0: return f"Skipped (graph has no edges after filtering): {basename}"
+
+        if num_nodes_after_filtering <= 1:
+            print(f"DEBUG: Skipping {basename} -> Reason: Trivial graph with {num_nodes_after_filtering} nodes.")
+            return f"Skipped (trivial graph with {num_nodes_after_filtering} nodes): {basename}"
+
+        if extractor.nx_graph.number_of_edges() == 0:
+            print(f"DEBUG: Skipping {basename} -> Reason: Graph has no edges after filtering.")
+            return f"Skipped (graph has no edges after filtering): {basename}"
+
         valid_indices = extractor.valid_original_indices
         filtered_feature_labels = [full_feature_labels[i] for i in valid_indices]
+
         full_instance_labels = [0] * num_original_faces
         for instance_id, face_group in enumerate(instance_groups_list, start=1):
             for face_idx in face_group:
                 if face_idx < num_original_faces: full_instance_labels[face_idx] = instance_id
+
         filtered_instance_labels = [full_instance_labels[i] for i in valid_indices]
         remaining_instance_ids = sorted(list(set(i for i in filtered_instance_labels if i > 0)))
         id_map = {old_id: new_id for new_id, old_id in enumerate(remaining_instance_ids, start=1)}
         final_instance_labels = [id_map.get(i, 0) for i in filtered_instance_labels]
+
         graph, graph_labels = extractor.process(filtered_feature_labels, final_instance_labels)
+
         try:
             data_id = int(filename_no_ext.split('_')[-1])
         except (ValueError, IndexError):
             data_id = 0
+
         graph.data_id = data_id
         dgl.data.utils.save_graphs(output_file, [graph], graph_labels)
+
         return f"Success: {basename}"
+
+    # --- 核心修改：在这里捕获分解失败的异常 ---
+    except sp.linalg.ArpackNoConvergence as e:
+        # 当捕获到这个特定异常时，打印跳过信息并返回
+        print(f"DEBUG: Skipping {basename} -> Reason: Laplace decomposition did not converge.")
+        return f"Skipped (Laplace decomposition failed): {basename}"
+
     except Exception as e:
+        # 其他所有异常仍然会被捕获并报告为“失败”
+        print(f"DEBUG: Failed {basename} -> Exception: {e}\n{traceback.format_exc()}")
         return f"Failed: {basename} -> {e}"
 
 
 def main():
+
     parser = argparse.ArgumentParser(description="从STEP文件夹批量、并行地提取B-rep数据到DGL图的.bin格式。")
     parser.add_argument("-i", "--input_dir", required=True, help="包含输入STEP (.stp, .step) 文件的文件夹路径。")
     parser.add_argument("-l", "--label_dir", required=True, help="包含面标签JSON文件的文件夹路径。")
