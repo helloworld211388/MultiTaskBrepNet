@@ -10,7 +10,7 @@ from .layers.brep_encoder_layer import GraphEncoderLayer, GraphNodeFeature, Grap
 
 def init_params(module):
     def normal_(data):
-        # --- 代码来源，未做修改 ---
+
         data.copy_(data.cpu().normal_(mean=0.0, std=0.02).to(data.device))
 
     if isinstance(module, nn.Linear):
@@ -23,7 +23,7 @@ def init_params(module):
             module.weight.data[module.padding_idx].zero_()
     if isinstance(module, MultiheadAttention):
         normal_(module.q_proj.weight.data)
-        # --- 代码来源，未做修改 ---
+
         normal_(module.k_proj.weight.data)
         normal_(module.v_proj.weight.data)
 
@@ -36,12 +36,14 @@ class BrepEncoder(nn.Module):
             num_edge_dis: int,
             edge_type: str,
             multi_hop_max_dist: int,
-            # --- 修改开始 ---
             # 原参数 num_encoder_layers 被替换为更具体的层数定义
             num_shared_layers: int = 4,
             num_semantic_layers: int = 3,
             num_instance_layers: int = 4,
-            # --- 修改结束 ---
+            # 新增LPE相关参数
+            lpe_dim: int = 32,
+            lpe_n_heads: int = 4,
+            lpe_layers: int = 2,
             embedding_dim: int = 128,
             ffn_embedding_dim: int = 128,
             num_attention_heads: int = 8,
@@ -72,22 +74,28 @@ class BrepEncoder(nn.Module):
         self.apply_params_init = apply_params_init
         self.traceable = traceable
 
+
         self.graph_node_feature = GraphNodeFeature(
             num_heads=num_attention_heads,
-            num_degree=num_degree,  # --- 代码来源，未做修改 ---
+            num_degree=num_degree,
             hidden_dim=embedding_dim,
-            n_layers=num_shared_layers + num_semantic_layers+num_instance_layers,  # 总层数用于参数初始化
+            n_layers=num_shared_layers + num_semantic_layers + num_instance_layers,
+            lpe_dim=lpe_dim,
+            lpe_n_heads=lpe_n_heads,
+            lpe_layers=lpe_layers,
         )
+
 
         self.graph_attn_bias = GraphAttnBias(
             dim_node=embedding_dim,
             num_heads=num_attention_heads,
             num_spatial=num_spatial,
             num_edge_dis=num_edge_dis,
-            edge_type=edge_type,  # --- 代码来源，未做修改 ---
+            edge_type=edge_type,
             multi_hop_max_dist=multi_hop_max_dist,
-            n_layers=num_shared_layers + num_semantic_layers+num_semantic_layers,  # 总层数用于参数初始化
+            n_layers=num_shared_layers + num_semantic_layers + num_semantic_layers,
         )
+
 
         self.embed_scale = embed_scale
 
@@ -247,18 +255,21 @@ class BrepEncoder(nn.Module):
         if token_embeddings is not None:
             x = token_embeddings
         else:
+
             x, x_0 = self.graph_node_feature(batch_data["node_data"],
                                              batch_data["face_area"],
                                              batch_data["face_type"],
                                              batch_data["face_loop"],
                                              batch_data["in_degree"],
-                                             # Note: This corresponds to face_degree in the function definition
                                              batch_data["centroid"],
                                              batch_data["curvature"],
                                              batch_data["inner_loops"],
                                              batch_data["adj_stats"],
                                              batch_data["rational"],
+                                             batch_data["EigVecs"],  # 传递EigVecs
+                                             batch_data["EigVals"],  # 传递EigVals
                                              batch_data["padding_mask"])
+
 
         if perturb is not None:
             x[:, 1:, :] += perturb

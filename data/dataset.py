@@ -76,9 +76,8 @@ class CADSynth(Dataset):
             num_nodes = graph.num_nodes()
             pyg_graph.instance_label = torch.zeros(num_nodes, dtype=torch.int)
 
-
         instance_labels = pyg_graph.instance_label
-        unique_ids = torch.unique(instance_labels[instance_labels > 0]) # 忽略背景ID 0
+        unique_ids = torch.unique(instance_labels[instance_labels > 0])  # 忽略背景ID 0
         positive_pairs = []
         for inst_id in unique_ids:
             # 找到属于当前实例的所有面的索引
@@ -127,6 +126,10 @@ class CADSynth(Dataset):
         pyg_graph.adj_stats = graph.ndata["adj_stats"].type(torch.float)
         pyg_graph.centroid_distance = graphfile[1]["centroid_distance"]
 
+        # Load Laplacian features
+        pyg_graph.EigVecs = graphfile[1]["EigVecs"]
+        pyg_graph.EigVals = graphfile[1]["EigVals"]
+
         _, file_extension = os.path.splitext(file_path)
         basename = os.path.basename(file_path).replace(file_extension, "")
         pyg_graph.data_id = int(basename.split("_")[-2])
@@ -161,7 +164,7 @@ class CADSynth(Dataset):
             # 使用 self.num_workers
             num_workers=self.num_workers,
             # 修改 drop_last 行为
-            drop_last=(self.split == 'train'), # 仅在训练时丢弃最后一个不完整的批次
+            drop_last=(self.split == 'train'),  # 仅在训练时丢弃最后一个不完整的批次
             pin_memory=True,
             persistent_workers=False if self.num_workers > 0 else False,
         )
@@ -211,7 +214,7 @@ class TransferDataset(Dataset):
             return
 
         with open(str(filelist_path), "r") as f:
-            file_list = {x.strip() for x in f.readlines()} # 使用集合以提高查找效率
+            file_list = {x.strip() for x in f.readlines()}  # 使用集合以提高查找效率
         print(f"Loaded {len(file_list)} names from {filelist_name}.")
 
         bin_dir = root_dir / "bin"
@@ -279,6 +282,10 @@ class TransferDataset(Dataset):
         pyg_graph.inner_loops = graph.ndata["inner_loops"].type(torch.float)
         pyg_graph.adj_stats = graph.ndata["adj_stats"].type(torch.float)
         pyg_graph.centroid_distance = graphfile[1]["centroid_distance"]
+
+        # Load Laplacian features
+        pyg_graph.EigVecs = graphfile[1]["EigVecs"]
+        pyg_graph.EigVals = graphfile[1]["EigVals"]
 
         _, file_extension = os.path.splitext(file_path)
         basename = os.path.basename(file_path).replace(file_extension, "")

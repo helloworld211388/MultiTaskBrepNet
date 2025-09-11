@@ -179,31 +179,29 @@ class GraphNodeFeature(nn.Module):
     """
 
     def __init__(
-            self, num_heads, num_degree, hidden_dim, n_layers
+            self, num_heads, num_degree, hidden_dim, n_layers, lpe_dim, lpe_n_heads, lpe_layers
     ):
         super(GraphNodeFeature, self).__init__()
         self.num_heads = num_heads
         self.hidden_dim = hidden_dim
+        self.lpe_dim = lpe_dim
 
-        # 【修改】为所有节点特征重新分配嵌入维度
-        # 目标总维度: hidden_dim (e.g., 128)
-        # 分配方案: 48 + 16 + 16 + 8*5 = 48 + 32 + 40 = 128
-        surf_dim = int(hidden_dim * 0.375)  # e.g., 48
-        centroid_dim = int(hidden_dim * 0.125)  # e.g., 16
-        adj_stats_dim = int(hidden_dim * 0.125)  # e.g., 16
-        other_dim = int(hidden_dim * 0.0625)  # e.g., 8 for the rest 5 features
-
-        # --- 修改开始: 重新分配特征维度以容纳新特征 ---
+        # --- 修改开始: 为LPE编码调整特征维度 ---
         # 目标总维度: hidden_dim (e.g., 256)
-        # 原分配方案: 96(surf) + 32(cent) + 32(adj) + 16*6(others) = 256
-        # 新分配方案: 80(surf) + 32(cent) + 32(adj) + 16*7(others) = 256
-        # 我们从 surf_encoder 中借用了一些维度给新的 rational_encoder
-        surf_dim = int(hidden_dim * 0.3125)  # e.g., 80
-        centroid_dim = int(hidden_dim * 0.125)  # e.g., 32
-        adj_stats_dim = int(hidden_dim * 0.125)  # e.g., 32
-        other_dim = int(hidden_dim * 0.0625)  # e.g., 16
+        # LPE维度: lpe_dim (e.g., 32)
+        # 剩余维度: remaining_dim = hidden_dim - lpe_dim
+        remaining_dim = hidden_dim - lpe_dim
 
-        # 原有的编码器，调整输出维度
+        # 重新分配剩余维度给其他特征
+        surf_dim = int(remaining_dim * 0.375)
+        centroid_dim = int(remaining_dim * 0.125)
+        adj_stats_dim = int(remaining_dim * 0.125)
+        # 确保其他维度的总和大致等于剩余维度
+        other_dim_count = 6 # face_area, face_type, face_loop, degree, curvature, inner_loops, rational
+        other_dim = (remaining_dim - surf_dim - centroid_dim - adj_stats_dim) // other_dim_count
+
+
+        # 原有的编码器，使用新的输出维度
         self.surf_encoder = SurfaceEncoder(
             in_channels=7, output_dims=surf_dim
         )
@@ -215,9 +213,12 @@ class GraphNodeFeature(nn.Module):
         self.curvature_encoder = nn.Embedding(3, other_dim)
         self.inner_loops_encoder = NonLinear(2, other_dim)
         self.adj_stats_encoder = NonLinear(18, adj_stats_dim)
+        self.rational_encoder = nn.Embedding(2, other_dim)
 
-        # 为 rational 属性创建新的编码器
-        self.rational_encoder = nn.Embedding(2, other_dim)  # 2个值 (0或1), 输出 other_dim
+        # 新增: LPE处理模块
+        self.linear_A = nn.Linear(2, lpe_dim)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=lpe_dim, nhead=lpe_n_heads, batch_first=False) # SAN使用的是(seq, batch, feature)
+        self.PE_Transformer = nn.TransformerEncoder(encoder_layer, num_layers=lpe_layers)
         # --- 修改结束 ---
 
         # 全局图标志
@@ -225,13 +226,32 @@ class GraphNodeFeature(nn.Module):
         self.apply(lambda module: init_params(module, n_layers=n_layers))
 
     def forward(self, x, face_area, face_type, face_loop, face_degree,
-
-                centroid, curvature, inner_loops, adj_stats,rational,
+                centroid, curvature, inner_loops, adj_stats, rational,
+                EigVecs, EigVals, # 新增 EigVecs 和 EigVals
                 padding_mask):
         # x [total_node_num, U_grid, V_grid, pnt_feature]
         # padding_mask [batch_size, max_node_num]
         n_graph, n_node = padding_mask.size()[:2]
         node_pos = torch.where(padding_mask == False)
+
+
+        # 1. 准备LPE输入
+        PosEnc = torch.cat((EigVecs.unsqueeze(2), EigVals.unsqueeze(2)), dim=2).float() # (Num nodes) x (Num Eigenvectors) x 2
+        empty_mask = torch.isnan(PosEnc) # (Num nodes) x (Num Eigenvectors) x 2
+        PosEnc[empty_mask] = 0 # (Num nodes) x (Num Eigenvectors) x 2
+
+        # 2. 线性映射和维度转换 (seq, batch, feature) for Transformer
+        PosEnc = torch.transpose(PosEnc, 0 ,1).float() # (Num Eigenvectors) x (Num nodes) x 2
+        PosEnc = self.linear_A(PosEnc) # (Num Eigenvectors) x (Num nodes) x lpe_dim
+
+        # 3. 通过Transformer学习位置编码
+        PosEnc = self.PE_Transformer(src=PosEnc, src_key_padding_mask=empty_mask[:,:,0])
+
+        # 4. 移除被mask的部分并进行池化
+        PosEnc[torch.transpose(empty_mask, 0 ,1)[:,:,0]] = float('nan')
+        PosEnc = torch.nansum(PosEnc, 0, keepdim=False) # (Num nodes) x lpe_dim
+
+
 
         # 通过原有的编码器
         x = x.permute(0, 3, 1, 2)
@@ -249,10 +269,13 @@ class GraphNodeFeature(nn.Module):
         rational_ = self.rational_encoder(rational)
 
 
+        # --- 修改开始: 拼接LPE编码 ---
         node_feature = torch.cat((
             x_, face_area_, face_type_, face_loop_, face_degree_,
-            centroid_, curvature_, inner_loops_, rational_,adj_stats_
+            centroid_, curvature_, inner_loops_, rational_, adj_stats_,
+            PosEnc # 在最后拼接LPE编码
         ), dim=-1)
+        # --- 修改结束 ---
 
         face_feature = torch.zeros([n_graph, n_node, self.hidden_dim], device=x.device, dtype=x.dtype)
         face_feature[node_pos] = node_feature[:]
