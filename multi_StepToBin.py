@@ -16,7 +16,7 @@
 # 【原有功能】:
 #   - 批量并行处理与GPU加速。
 #   - 提取多种面/边/图级别特征。
-#   - 
+#   -
 # ==========================================================================================
 
 
@@ -65,6 +65,8 @@ from occwl.graph import face_adjacency
 
 # 【MFTReNet方案一: 增强边的U-Grid特征】 导入 EdgeDataExtractor
 from occwl.edge_data_extractor import EdgeDataExtractor
+from scipy import sparse as sp
+import torch.nn.functional as F
 
 # --- 论文中定义的常量 ---
 UV_GRID_SIZE = 5
@@ -76,6 +78,38 @@ SPATIAL_POS_MAX = 32
 # 【新增】为新特征定义的常量
 NUM_ADJ_STATS = 18
 LABELS_TO_SKIP = {24, 25, 26}
+MAX_FREQS = 10  # Define max_freqs for Laplacian decomposition
+
+
+def laplace_decomposition(g, max_freqs):
+    # Laplacian
+    n = g.number_of_nodes()
+    A = g.adjacency_matrix(scipy_fmt="csr").astype(float)
+    N = sp.diags(np.array(g.in_degrees()).clip(1) ** -0.5, dtype=float)
+    L = sp.eye(g.number_of_nodes()) - N * A * N
+
+    # Eigenvectors with numpy
+    EigVals, EigVecs = np.linalg.eigh(L.toarray())
+    EigVals, EigVecs = EigVals[: max_freqs], EigVecs[
+        :, :max_freqs]  # Keep up to the maximum desired number of frequencies
+
+    # Normalize and pad EigenVectors
+    EigVecs = torch.from_numpy(EigVecs).float()
+    EigVecs = F.normalize(EigVecs, p=2, dim=1, eps=1e-12, out=None)
+
+    if n < max_freqs:
+        EigVecs = F.pad(EigVecs, (0, max_freqs - n), value=float('nan'))
+
+    # Save eigenvalues and pad
+    EigVals = torch.from_numpy(np.sort(np.abs(np.real(
+        EigVals))))  # Abs value is taken because numpy sometimes computes the first eigenvalue approaching 0 from the negative
+
+    if n < max_freqs:
+        EigVals = F.pad(EigVals, (0, max_freqs - n), value=float('nan')).unsqueeze(0)
+    else:
+        EigVals = EigVals.unsqueeze(0)
+
+    return EigVecs, EigVals
 
 
 def normalize_shape(shape: TopoDS_Shape) -> TopoDS_Shape:
@@ -278,12 +312,18 @@ class BrepDataExtractor:
 
         spatial_pos, d2_dist, a3_dist, centroid_dist = self._extract_proximity_features()
         edge_path = self._extract_edge_paths(MAX_HOP_DISTANCE, edge_idx_map)
+
+        # Laplacian decomposition
+        EigVecs, EigVals = laplace_decomposition(dgl_graph, MAX_FREQS)
+
         graph_labels = {
             "spatial_pos": torch.from_numpy(spatial_pos).int(),
             "d2_distance": torch.from_numpy(d2_dist).float(),
             "angle_distance": torch.from_numpy(a3_dist).float(),
             "edges_path": torch.from_numpy(edge_path).int(),
             "centroid_distance": torch.from_numpy(centroid_dist).float(),
+            "EigVecs": EigVecs,
+            "EigVals": EigVals,
         }
         return dgl_graph, graph_labels
 
