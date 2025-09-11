@@ -107,7 +107,7 @@ class MultiTaskBrepNet(pl.LightningModule):
             attention_dropout=args.attention_dropout,
             activation_dropout=args.act_dropout, layerdrop=0.1,
             encoder_normalize_before=True, pre_layernorm=True,
-            apply_params_init=True, activation_fn="gelu",
+            apply_params_init=True, activation_fn="mish",
         )
 
         self.attention_fusion = AttentionFusion(embedding_dim=args.dim_node)
@@ -118,7 +118,7 @@ class MultiTaskBrepNet(pl.LightningModule):
         self.instance_embedding_dim = args.dim_node
         self.instance_embedding_projector = nn.Sequential(
             nn.Linear(combined_input_dim, self.instance_embedding_dim),
-            nn.ReLU(),
+            nn.Mish(),
             LayerNorm(self.instance_embedding_dim)
         )
 

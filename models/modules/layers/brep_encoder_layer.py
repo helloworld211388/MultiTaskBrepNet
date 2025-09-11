@@ -47,7 +47,10 @@ class GraphEncoderLayer(nn.Module):
         )
 
         # Initialize blocks
-        self.activation_fn = utils.get_activation_fn(activation_fn)
+        if activation_fn == "mish":
+            self.activation_fn = F.mish
+        else:
+            self.activation_fn = utils.get_activation_fn(activation_fn)
         self.self_attn = self.build_self_attention(
             self.embedding_dim,
             num_attention_heads,
