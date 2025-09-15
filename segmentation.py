@@ -65,7 +65,7 @@ parser.add_argument("--num_semantic_layers", type=int, default=4,
                     help="Number of task-specific layers in the SEMANTIC branch of the encoder.")
 parser.add_argument("--num_instance_layers", type=int, default=4,
                     help="Number of task-specific layers in the INSTANCE branch of the encoder.")
-parser.add_argument("--semantic_loss_weight", type=float, default=0.2,
+parser.add_argument("--semantic_loss_weight", type=float, default=0.5,
                     help="The weight for the semantic loss component in the total loss.")
 # --- 修改结束 ---
 

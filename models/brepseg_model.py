@@ -89,7 +89,7 @@ class MultiTaskBrepNet(pl.LightningModule):
         self.num_semantic_classes = args.num_classes
         self.num_instance_classes = getattr(args, 'num_instance_classes', args.num_classes)
         self.ortho_loss_weight = 0.1
-        self.semantic_loss_weight = getattr(args, 'semantic_loss_weight', 0.2)
+        self.semantic_loss_weight = getattr(args, 'semantic_loss_weight', 0.5)
 
         self.lr = getattr(args, 'lr', 5e-5)
         self.warmup_steps = getattr(args, 'warmup_steps', 5000)
@@ -140,6 +140,14 @@ class MultiTaskBrepNet(pl.LightningModule):
         all_embeddings = embeddings
         sim_matrix = torch.matmul(anchor_embeddings, all_embeddings.t()) / self.temperature
 
+        # ======================= 调试代码块 (开始) =======================
+        # 打印进入指数函数前 sim_matrix 的统计信息
+        sim_matrix_max_val = torch.max(sim_matrix).item()
+        sim_matrix_min_val = torch.min(sim_matrix).item()
+        print(f"\n--- 内部调试: _compute_multi_positive_loss ---")
+        print(f"sim_matrix max/min: {sim_matrix_max_val:.4f} / {sim_matrix_min_val:.4f}")
+        # ======================= 调试代码块 (结束) =======================
+
         sim_matrix_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
         sim_matrix = sim_matrix - sim_matrix_max.detach()
 
@@ -148,8 +156,23 @@ class MultiTaskBrepNet(pl.LightningModule):
 
         exp_sim_matrix = torch.exp(sim_matrix)
 
+        # ======================= 调试代码块 (开始) =======================
+        # 检查 exp_sim_matrix 是否包含 inf
+        has_inf = torch.isinf(exp_sim_matrix).any().item()
+        if has_inf:
+            print(f"警告: exp_sim_matrix 中检测到无穷大(inf)值！")
+
         denominator = exp_sim_matrix.sum(dim=1)
         numerator = (exp_sim_matrix * pos_mask).sum(dim=1)
+
+        # 检查分子或分母是否为零
+        if (denominator == 0).any().item():
+            print(f"警告: denominator 中检测到零值！")
+        if (numerator == 0).any().item():
+            # 注意：分子为零是正常情况，但在这里打印出来有助于观察
+            print(f"信息: numerator 中存在零值。")
+        print(f"-------------------------------------------\n")
+        # ======================= 调试代码块 (结束) =======================
 
         loss_per_anchor = -torch.log(numerator / (denominator + 1e-7))
         return loss_per_anchor.mean()
@@ -206,7 +229,17 @@ class MultiTaskBrepNet(pl.LightningModule):
             
             loss_semantic_fp32 = loss_semantic.float()
             loss_instance_fp32 = loss_instance.float()
-            main_loss = torch.sqrt(loss_semantic_fp32 * loss_instance_fp32 + 1e-8)
+
+            # ======================= 调试代码块 (开始) =======================
+
+            # 检查是否有NaN或无穷大值
+            if torch.isnan(loss_semantic_fp32) or torch.isinf(loss_semantic_fp32):
+                print(f"警告: 在批次 {batch_idx} 中 loss_semantic_fp32 出现无效值!")
+            if torch.isnan(loss_instance_fp32) or torch.isinf(loss_instance_fp32):
+                print(f"警告: 在批次 {batch_idx} 中 loss_instance_fp32 出现无效值!")
+            print(f"----------------\n")
+            # ======================= 调试代码块 (结束) =======================
+            main_loss = self.semantic_loss_weight * loss_semantic_fp32 + (1 - self.semantic_loss_weight) * loss_instance_fp32
 
             total_loss = main_loss + self.ortho_loss_weight * loss_ortho
 
@@ -278,7 +311,7 @@ class MultiTaskBrepNet(pl.LightningModule):
 
             loss_semantic_fp32 = loss_semantic.float()
             loss_instance_fp32 = loss_instance.float()
-            main_loss = torch.sqrt(loss_semantic_fp32 * loss_instance_fp32 + 1e-8)
+            main_loss = self.semantic_loss_weight * loss_semantic_fp32 + (1 - self.semantic_loss_weight) * loss_instance_fp32
             total_loss = main_loss + self.ortho_loss_weight * loss_ortho
 
         self.log("eval_loss", total_loss, on_step=False, on_epoch=True, prog_bar=True)
@@ -379,7 +412,7 @@ class MultiTaskBrepNet(pl.LightningModule):
         #         'embeddings': split_instance_embeddings[i].cpu(),
         #         'logits': split_semantic_logits[i].cpu(),
         #         'instance_gt': split_instance_labels_gt[i].cpu(),
-        #         'semantic_gt': split_semantic_labels_gt[i].cpu(),
+        #         'semantic_gt': split_semanti王者c_labels_gt[i].cpu(),
         #         'id': split_ids[i].cpu().item(),
         #     })
 

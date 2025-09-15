@@ -275,6 +275,8 @@ class GraphNodeFeature(nn.Module):
         x = x.permute(0, 3, 1, 2)
         x_ = self.surf_encoder(x)
         face_area_ = self.face_area_encoder(face_area.unsqueeze(dim=1))
+
+
         face_type_ = self.face_type_encoder(face_type)
         face_loop_ = self.face_loop_encoder(face_loop)
         face_degree_ = self.degree_encoder(face_degree)
@@ -472,36 +474,37 @@ class GraphAttnBias(nn.Module):
         graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + centroid_dist_bias
 
         # 5. 边特征编码 (multi_hop)
-        if self.edge_type == "multi_hop":
-            spatial_pos_ = spatial_pos.clone()
-            spatial_pos_[spatial_pos_ == 0] = 1
-            spatial_pos_ = torch.where(spatial_pos_ > 1, spatial_pos_ - 1, spatial_pos_)
-            spatial_pos_ = spatial_pos_.clamp(0, self.multi_hop_max_dist)
-
-            max_dist = self.multi_hop_max_dist
-            edge_data = edge_data.permute(0, 2, 1)
-            edge_data_ = self.curv_encoder(edge_data)
-            edge_type_ = self.edge_type_encoder(edge_type)
-            edge_len_ = self.edge_len_encoder(edge_len.unsqueeze(dim=1))
-            edge_ang_ = self.edge_ang_encoder(edge_ang.unsqueeze(dim=1))
-            edge_conv_ = self.edge_conv_encoder(edge_conv)
-            edge_feat = edge_data_ + edge_type_ + edge_len_ + edge_ang_ + edge_conv_
-
-            edge_feat_ = self.node_cat(graph, node_feat, edge_feat)
-
-            zero_feature = torch.zeros(1, edge_feat_.size(-1), device=edge_feat_.device, dtype=edge_feat_.dtype)
-            edge_feature_global = torch.cat([zero_feature, edge_feat_], dim=0)
-
-            edge_path_reshaped = edge_path.reshape(n_graph, n_node * n_node * max_dist)
-            edge_bias = edge_feature_global[edge_path_reshaped]
-            edge_bias = edge_bias.reshape(n_graph, n_node, n_node, max_dist, self.num_heads)
-
-            edge_bias = edge_bias.permute(3, 0, 1, 2, 4).reshape(max_dist, -1, self.num_heads)
-            edge_bias = torch.bmm(edge_bias, self.edge_dis_encoder[:max_dist, :, :])
-            edge_bias = edge_bias.reshape(max_dist, n_graph, n_node, n_node, self.num_heads).permute(1, 2, 3, 0, 4)
-            edge_bias = (edge_bias.sum(-2) / (spatial_pos_.float().unsqueeze(-1)))
-            edge_bias = edge_bias.permute(0, 3, 1, 2)
-            graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + edge_bias
+        # if self.edge_type == "multi_hop":
+        #     spatial_pos_ = spatial_pos.clone()
+        #     spatial_pos_[spatial_pos_ == 0] = 1
+        #     spatial_pos_ = torch.where(spatial_pos_ > 1, spatial_pos_ - 1, spatial_pos_)
+        #     spatial_pos_ = spatial_pos_.clamp(0, self.multi_hop_max_dist)
+        #
+        #     max_dist = self.multi_hop_max_dist
+        #     edge_data = edge_data.permute(0, 2, 1)
+        #     edge_data_ = self.curv_encoder(edge_data)
+        #     edge_type_ = self.edge_type_encoder(edge_type)
+        #     normalized_edge_len = torch.log1p(edge_len)
+        #     edge_len_ = self.edge_len_encoder(normalized_edge_len.unsqueeze(dim=1))
+        #     edge_ang_ = self.edge_ang_encoder(edge_ang.unsqueeze(dim=1))
+        #     edge_conv_ = self.edge_conv_encoder(edge_conv)
+        #     edge_feat = edge_data_ + edge_type_ + edge_len_ + edge_ang_ + edge_conv_
+        #
+        #     edge_feat_ = self.node_cat(graph, node_feat, edge_feat)
+        #
+        #     zero_feature = torch.zeros(1, edge_feat_.size(-1), device=edge_feat_.device, dtype=edge_feat_.dtype)
+        #     edge_feature_global = torch.cat([zero_feature, edge_feat_], dim=0)
+        #
+        #     edge_path_reshaped = edge_path.reshape(n_graph, n_node * n_node * max_dist)
+        #     edge_bias = edge_feature_global[edge_path_reshaped]
+        #     edge_bias = edge_bias.reshape(n_graph, n_node, n_node, max_dist, self.num_heads)
+        #
+        #     edge_bias = edge_bias.permute(3, 0, 1, 2, 4).reshape(max_dist, -1, self.num_heads)
+        #     edge_bias = torch.bmm(edge_bias, self.edge_dis_encoder[:max_dist, :, :])
+        #     edge_bias = edge_bias.reshape(max_dist, n_graph, n_node, n_node, self.num_heads).permute(1, 2, 3, 0, 4)
+        #     edge_bias = (edge_bias.sum(-2) / (spatial_pos_.float().unsqueeze(-1)))
+        #     edge_bias = edge_bias.permute(0, 3, 1, 2)
+        #     graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + edge_bias
 
         # --- 修改的核心逻辑: 在所有边相关的偏置计算完后，应用 gamma 缩放 ---
         # 使用 spatial_pos (最短路径距离) 来识别虚拟边
