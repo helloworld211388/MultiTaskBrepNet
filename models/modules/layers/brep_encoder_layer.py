@@ -180,7 +180,7 @@ class GraphNodeFeature(nn.Module):
     """
     Compute node features for each node in the graph.
     """
-
+#对应论文的Feature encoding过程
     def __init__(
             self, num_heads, num_degree, hidden_dim, n_layers, lpe_dim, lpe_n_heads, lpe_layers
     ):
@@ -200,12 +200,9 @@ class GraphNodeFeature(nn.Module):
         centroid_dim = int(remaining_dim * 0.125)
         adj_stats_dim = int(remaining_dim * 0.125)
 
-        # ======================= 修改点 (开始) =======================
-        # 确保其他维度的总和大致等于剩余维度
-        # 旧值: other_dim_count = 6
-        other_dim_count = 7  # 新值: 7 (face_area, face_type, face_loop, degree, curvature, inner_loops, rational)
-        # ======================= 修改点 (结束) =======================
 
+        other_dim_count = 7  # 新值: 7 (face_area, face_type, face_loop, degree, curvature, inner_loops, rational)
+        #计算每个其它特征的维度
         other_dim = (remaining_dim - surf_dim - centroid_dim - adj_stats_dim) // other_dim_count
 
         # 原有的编码器，使用新的输出维度
@@ -213,12 +210,12 @@ class GraphNodeFeature(nn.Module):
             in_channels=7, output_dims=surf_dim
         )
         self.face_area_encoder = NonLinear(1, other_dim)
-        self.face_type_encoder = nn.Embedding(9, other_dim, padding_idx=0)
+        self.face_type_encoder = nn.Embedding(9, other_dim, padding_idx=0)#Embedding类似于词袋模型的权重矩阵，可以输入一个词的索引，输出该词的向量表示
         self.face_loop_encoder = nn.Embedding(256, other_dim, padding_idx=0)
         self.degree_encoder = nn.Embedding(num_degree, other_dim, padding_idx=0)
         self.centroid_encoder = NonLinear(3, centroid_dim)
         self.curvature_encoder = nn.Embedding(3, other_dim)
-        self.inner_loops_encoder = NonLinear(2, other_dim)
+        self.inner_loops_encoder = NonLinear(2, other_dim)#只有2个吗？
         self.adj_stats_encoder = NonLinear(18, adj_stats_dim)
         self.rational_encoder = nn.Embedding(2, other_dim)
 
@@ -230,70 +227,70 @@ class GraphNodeFeature(nn.Module):
         # --- 修改结束 ---
 
         # 全局图标志
-        self.graph_token = nn.Embedding(1, hidden_dim)
+        self.graph_token = nn.Embedding(1, hidden_dim)#这个是一个全局的图标志
         self.apply(lambda module: init_params(module, n_layers=n_layers))
 
     def forward(self, x, face_area, face_type, face_loop, face_degree,
                 centroid, curvature, inner_loops, adj_stats, rational,
-                EigVecs, EigVals,  # 新增 EigVecs 和 EigVals
+                EigVecs, EigVals,
                 padding_mask):
-        # x [total_node_num, U_grid, V_grid, pnt_feature]
-        # padding_mask [batch_size, max_node_num]
         n_graph, n_node = padding_mask.size()[:2]
         node_pos = torch.where(padding_mask == False)
 
-        # 1. 准备LPE输入
-        # 计算每个图的实际节点数
+        # ======================= 核心修复 (开始) =======================
+        # 1. 对特征向量进行归一化 (L2-Normalization)，防止出现极大值
+        #    为避免除以零，在分母上增加一个极小值 epsilon
+        eig_vecs_norm = F.normalize(EigVecs, p=2, dim=1, eps=1e-12)
+
+        # 2. 对特征值进行范围限制 (Clamping)，防止极端值
+        #    将特征值限制在一个合理的范围内，例如 [-100, 100]
+        eig_vals_clamped = torch.clamp(EigVals, min=-100.0, max=100.0)
+        # ======================= 核心修复 (结束) =======================
+
+        # 准备LPE输入
         num_nodes_per_graph = (~padding_mask).sum(dim=1)
 
-        # 使用 repeat_interleave 为每个节点复制其所在图的特征值
-        # EigVals [batch_size, k] -> EigVals_repeated [总节点数, k]
-        EigVals_repeated = torch.repeat_interleave(EigVals, num_nodes_per_graph, dim=0)
+        # 使用处理后的特征值
+        EigVals_repeated = torch.repeat_interleave(eig_vals_clamped, num_nodes_per_graph, dim=0)
 
-        # 现在 EigVecs 和 EigVals_repeated 的形状都是 [总节点数, k]
-        # 我们可以安全地 unsqueeze 并在新维度上拼接它们
+        # 使用处理后的特征向量
         PosEnc = torch.cat(
-            (EigVecs.unsqueeze(2), EigVals_repeated.unsqueeze(2)), dim=2
-        ).float()  # (总节点数) x (k) x 2
+            (eig_vecs_norm.unsqueeze(2), EigVals_repeated.unsqueeze(2)), dim=2
+        ).float()
 
+        empty_mask = torch.isnan(PosEnc)
+        PosEnc[empty_mask] = 0
 
-        empty_mask = torch.isnan(PosEnc)  # (Num nodes) x (Num Eigenvectors) x 2
-        PosEnc[empty_mask] = 0  # (Num nodes) x (Num Eigenvectors) x 2
+        # 线性映射和维度转换
+        PosEnc = torch.transpose(PosEnc, 0, 1).float()
+        PosEnc = self.linear_A(PosEnc)
 
-        # 2. 线性映射和维度转换 (seq, batch, feature) for Transformer
-        PosEnc = torch.transpose(PosEnc, 0, 1).float()  # (Num Eigenvectors) x (Num nodes) x 2
-        PosEnc = self.linear_A(PosEnc)  # (Num Eigenvectors) x (Num nodes) x lpe_dim
-
-        # 3. 通过Transformer学习位置编码
+        # 通过Transformer学习位置编码
         PosEnc = self.PE_Transformer(src=PosEnc, src_key_padding_mask=empty_mask[:, :, 0])
 
-        # 4. 移除被mask的部分并进行池化
+        # 移除被mask的部分并进行池化
         PosEnc[torch.transpose(empty_mask, 0, 1)[:, :, 0]] = float('nan')
-        PosEnc = torch.nansum(PosEnc, 0, keepdim=False)  # (Num nodes) x lpe_dim
+        PosEnc = torch.nansum(PosEnc, 0, keepdim=False)
 
         # 通过原有的编码器
         x = x.permute(0, 3, 1, 2)
         x_ = self.surf_encoder(x)
         face_area_ = self.face_area_encoder(face_area.unsqueeze(dim=1))
-
-
         face_type_ = self.face_type_encoder(face_type)
         face_loop_ = self.face_loop_encoder(face_loop)
         face_degree_ = self.degree_encoder(face_degree)
-
         centroid_ = self.centroid_encoder(centroid)
         curvature_ = self.curvature_encoder(curvature)
         inner_loops_ = self.inner_loops_encoder(inner_loops)
         adj_stats_ = self.adj_stats_encoder(adj_stats)
         rational_ = self.rational_encoder(rational)
 
-        # --- 修改开始: 拼接LPE编码 ---
+        # 拼接所有特征
         node_feature = torch.cat((
             x_, face_area_, face_type_, face_loop_, face_degree_,
             centroid_, curvature_, inner_loops_, rational_, adj_stats_,
-            PosEnc  # 在最后拼接LPE编码
+            PosEnc
         ), dim=-1)
-        # --- 修改结束 ---
 
         face_feature = torch.zeros([n_graph, n_node, self.hidden_dim], device=x.device, dtype=x.dtype)
         face_feature[node_pos] = node_feature[:]

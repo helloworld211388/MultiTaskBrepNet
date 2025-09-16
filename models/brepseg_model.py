@@ -130,6 +130,29 @@ class MultiTaskBrepNet(pl.LightningModule):
         self.instance_post_process_data = [] # 用于 rec/loc F1 评估
 
     def _compute_multi_positive_loss(self, embeddings, pos_edge_index):
+        # ======================= 在此插入调试代码 (开始) =======================
+        # 目标：检查是否存在零向量，因为这是导致 F.normalize 产生 NaN 的最直接原因。
+
+        # 1. 计算每个嵌入向量的 L2 范数（即向量的长度）
+        norms = torch.linalg.norm(embeddings, ord=2, dim=-1)
+
+        # 2. 查找范数接近于零（或等于零）的向量
+        # 我们使用一个很小的阈值来捕获数值上的下溢
+        zero_norm_indices = torch.where(norms < 1e-9)[0]
+
+        # 3. 如果找到了零向量，则打印详细的调试信息
+        if len(zero_norm_indices) > 0:
+            print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            print("!!!   调试捕获: 在 instance_embeddings 中发现零向量   !!!")
+            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            print(f"当前批次中，共发现 {len(zero_norm_indices)} 个零向量。")
+            print(f"这会导致 F.normalize 操作因除以零而产生 NaN。")
+            # 打印出前5个有问题的向量的索引及其范数值，以便追踪
+            for i in range(min(5, len(zero_norm_indices))):
+                idx = zero_norm_indices[i]
+                print(f"  - 向量索引: {idx.item()}, 其范数值: {norms[idx].item()}")
+            print("--------------------------------------------------------\n")
+        # ======================= 在此插入调试代码 (结束) =======================
         embeddings = F.normalize(embeddings, p=2, dim=-1)
         if pos_edge_index.numel() == 0:
             return torch.tensor(0.0, device=embeddings.device)
@@ -202,9 +225,48 @@ class MultiTaskBrepNet(pl.LightningModule):
         return semantic_logits, instance_embeddings, semantic_nodes, instance_nodes
 
     def training_step(self, batch, batch_idx):
+
+
         self.train()
         semantic_logits, instance_embeddings, semantic_nodes, instance_nodes = self.forward(batch)
+        # ======================= 在此插入最终调试代码 (开始) =======================
+        # 目标：在前向传播刚一结束，就立刻检查 instance_embeddings 是否包含 inf 或 NaN。
+        # 这是捕获问题的最上游位置。
 
+        # 1. 使用 torch.isfinite() 检查是否存在无穷大 (inf) 或无效数字 (NaN)
+        is_finite = torch.all(torch.isfinite(instance_embeddings))
+
+        # 2. 如果张量中存在非有限值，则触发调试信息
+        if not is_finite:
+            print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            print("!!!   调试捕获: forward() 的输出 instance_embeddings 包含无效值   !!!")
+            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            print(f"在训练批次 {batch_idx}，模型权重在更新后可能变得不稳定。")
+
+            # 找出具体是哪种无效值
+            has_nan = torch.isnan(instance_embeddings).any()
+            has_inf = torch.isinf(instance_embeddings).any()
+
+            if has_nan:
+                print("-  检测到 NaN 值。")
+            if has_inf:
+                print("-  检测到 Inf (无穷大) 值。这是导致 NaN 的根本原因。")
+
+            # 打印一些统计信息帮助分析
+            print(f"张量维度: {instance_embeddings.shape}")
+
+            # 为了避免打印过多数据，我们只显示一部分有问题的值
+            inf_indices = torch.where(torch.isinf(instance_embeddings))
+            if len(inf_indices[0]) > 0:
+                print(f"前 5 个 Inf 值的坐标 (行, 列):")
+                for i in range(min(5, len(inf_indices[0]))):
+                    row, col = inf_indices[0][i], inf_indices[1][i]
+                    print(f"  - ({row.item()}, {col.item()})")
+
+            print("----------------------------------------------------------------\n")
+            # 直接返回，跳过这个批次的损失计算和反向传播，防止程序崩溃
+            return None
+        # ======================= 在此插入最终调试代码 (结束) =======================
         if semantic_logits.numel() == 0: return None
 
         semantic_labels = batch["label_feature"].long()

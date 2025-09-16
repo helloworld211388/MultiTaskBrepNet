@@ -257,7 +257,6 @@ class BrepEncoder(nn.Module):
         if token_embeddings is not None:
             x = token_embeddings
         else:
-
             x, x_0 = self.graph_node_feature(batch_data["node_data"],
                                              batch_data["face_area"],
                                              batch_data["face_type"],
@@ -268,10 +267,14 @@ class BrepEncoder(nn.Module):
                                              batch_data["inner_loops"],
                                              batch_data["adj_stats"],
                                              batch_data["rational"],
-                                             batch_data["EigVecs"],  # 传递EigVecs
-                                             batch_data["EigVals"],  # 传递EigVals
+                                             batch_data["EigVecs"],
+                                             batch_data["EigVals"],
                                              batch_data["padding_mask"])
 
+        # ======================= BrepEncoder 调试点 1: 检查初始节点特征 =======================
+        if not torch.all(torch.isfinite(x)):
+            print("\n--- BrepEncoder 调试 (1): 初始节点特征 'x' 包含无效值 ---")
+        # =================================================================================
 
         if perturb is not None:
             x[:, 1:, :] += perturb
@@ -292,6 +295,11 @@ class BrepEncoder(nn.Module):
                                          x_0
                                          )
 
+        # ======================= BrepEncoder 调试点 2: 检查注意力偏置 =======================
+        if not torch.all(torch.isfinite(attn_bias)):
+            print("\n--- BrepEncoder 调试 (2): 'attn_bias' 包含无效值 ---")
+        # =================================================================================
+
         padding_mask_cls = torch.zeros(n_graph, 1, device=padding_mask.device, dtype=padding_mask.dtype)
         padding_mask = torch.cat((padding_mask_cls, padding_mask), dim=1)
 
@@ -307,61 +315,63 @@ class BrepEncoder(nn.Module):
         x = self.dropout_module(x)
         x = x.transpose(0, 1)
 
-
-        torch.cuda.synchronize()
-
         # 1. 通过共享编码模块
-        torch.cuda.synchronize()
         for i, layer in enumerate(self.shared_layers):
-            torch.cuda.synchronize()
             x, _ = layer(
                 x,
                 self_attn_padding_mask=padding_mask,
                 self_attn_mask=attn_mask,
                 self_attn_bias=attn_bias,
             )
-            torch.cuda.synchronize()
-            torch.cuda.synchronize()
+            # ======================= BrepEncoder 调试点 3: 检查共享层输出 =======================
+            if not torch.all(torch.isfinite(x)):
+                print(f"\n--- BrepEncoder 调试 (3): 共享层 {i + 1}/{len(self.shared_layers)} 的输出 'x' 包含无效值 ---")
+                # 如果发现无效值，立即返回，防止后续代码崩溃
+                nan_tensor = torch.full_like(x, float('nan'))
+                return nan_tensor, nan_tensor, nan_tensor, torch.full_like(x[0, :, :], float('nan'))
+            # =====================================================================================
 
         shared_features = x
-        torch.cuda.synchronize()
-
         graph_rep = shared_features[0, :, :]
 
         # 3. 通过任务特定分支
         # 语义分割分支
-        torch.cuda.synchronize()
         semantic_x = shared_features
         for i, layer in enumerate(self.semantic_layers):
-            torch.cuda.synchronize()
             semantic_x, _ = layer(
                 semantic_x,
                 self_attn_padding_mask=padding_mask,
                 self_attn_mask=attn_mask,
                 self_attn_bias=attn_bias,
             )
-            torch.cuda.synchronize()
-            torch.cuda.synchronize()
+            # ======================= BrepEncoder 调试点 4: 检查语义层输出 =======================
+            if not torch.all(torch.isfinite(semantic_x)):
+                print(
+                    f"\n--- BrepEncoder 调试 (4): 语义层 {i + 1}/{len(self.semantic_layers)} 的输出 'semantic_x' 包含无效值 ---")
+                nan_tensor = torch.full_like(x, float('nan'))
+                return nan_tensor, nan_tensor, nan_tensor, torch.full_like(x[0, :, :], float('nan'))
+            # =====================================================================================
 
         semantic_features = self.tanh(semantic_x)
-        torch.cuda.synchronize()
 
         # 实例分割分支
-        torch.cuda.synchronize()
         instance_x = shared_features
         for i, layer in enumerate(self.instance_layers):
-            torch.cuda.synchronize()
             instance_x, _ = layer(
                 instance_x,
                 self_attn_padding_mask=padding_mask,
                 self_attn_mask=attn_mask,
                 self_attn_bias=attn_bias,
             )
-            torch.cuda.synchronize()
-            torch.cuda.synchronize()
+            # ======================= BrepEncoder 调试点 5: 检查实例层输出 =======================
+            if not torch.all(torch.isfinite(instance_x)):
+                print(
+                    f"\n--- BrepEncoder 调试 (5): 实例层 {i + 1}/{len(self.instance_layers)} 的输出 'instance_x' 包含无效值 ---")
+                nan_tensor = torch.full_like(x, float('nan'))
+                return nan_tensor, nan_tensor, nan_tensor, torch.full_like(x[0, :, :], float('nan'))
+            # =====================================================================================
 
         instance_features = self.tanh(instance_x)
-        torch.cuda.synchronize()
 
         shared_features = shared_features.transpose(0, 1)
         semantic_features = semantic_features.transpose(0, 1)
