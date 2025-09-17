@@ -42,7 +42,7 @@ class BrepEncoder(nn.Module):
             num_instance_layers: int = 4,
             gamma: float = 0.1,
             # 新增LPE相关参数
-            lpe_dim: int = 32,
+            lpe_dim: int = 16,
             lpe_n_heads: int = 4,
             lpe_layers: int = 2,
             embedding_dim: int = 128,

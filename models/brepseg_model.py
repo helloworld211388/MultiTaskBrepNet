@@ -152,48 +152,17 @@ class MultiTaskBrepNet(pl.LightningModule):
 
     # ======================= 新增调试代码块 (结束) =======================
     def _compute_multi_positive_loss(self, embeddings, pos_edge_index):
-        # ======================= 调试代码块 (开始) =======================
-        # 目标: 检查所有关键中间变量，验证是否存在数值爆炸
-        print("\n--- [调试] 进入 _compute_multi_positive_loss ---")
-        batch_idx = self.trainer.global_step
 
-        def check_tensor(name, tensor):
-            if not torch.is_tensor(tensor) or tensor.numel() == 0:
-                print(f"  - {name}: 非张量或为空")
-                return
-            has_nan = torch.isnan(tensor).any().item()
-            has_inf = torch.isinf(tensor).any().item()
-            print(
-                f"  - {name}: Shape: {tensor.shape}, NaN: {has_nan}, Inf: {has_inf}, Max: {tensor.max().item():.4f}, Min: {tensor.min().item():.4f}")
-            if has_nan or has_inf:
-                print(f"  - [!!!] 在 {name} 中发现无效值!")
-
-        if batch_idx <= 1:  # 只在前两个批次打印详细日志
-            print(f"\n--- 批次 {int(batch_idx)} 的详细计算过程 ---")
-            check_tensor("输入 embeddings", embeddings)
-
-        # 1. 检查归一化后的 embeddings
         normalized_embeddings = F.normalize(embeddings, p=2, dim=-1)
-        if batch_idx <= 1:
-            check_tensor("归一化后 embeddings", normalized_embeddings)
-
-        if pos_edge_index.numel() == 0:
-            print("  - pos_edge_index 为空, 返回损失 0.0")
-            return torch.tensor(0.0, device=embeddings.device)
-
         unique_anchors_indices, inverse_indices = torch.unique(pos_edge_index[0], return_inverse=True)
         anchor_embeddings = normalized_embeddings[unique_anchors_indices]
 
         all_embeddings = normalized_embeddings
         sim_matrix = torch.matmul(anchor_embeddings, all_embeddings.t()) / self.temperature
-        if batch_idx <= 1:
-            check_tensor("sim_matrix (相似度矩阵)", sim_matrix)
 
         # 2. 检查 exp 指数操作后的结果
         # 这是最容易发生数值溢出的地方
         exp_sim_matrix = torch.exp(sim_matrix)
-        if batch_idx <= 1:
-            check_tensor("exp_sim_matrix (指数化后)", exp_sim_matrix)
 
         # 3. 检查分子和分母
         pos_mask = torch.zeros_like(sim_matrix, dtype=torch.bool)
@@ -201,27 +170,14 @@ class MultiTaskBrepNet(pl.LightningModule):
 
         denominator = exp_sim_matrix.sum(dim=1)
         numerator = (exp_sim_matrix * pos_mask).sum(dim=1)
-        if batch_idx <= 1:
-            check_tensor("分母 denominator", denominator)
-            check_tensor("分子 numerator", numerator)
+
 
         # 4. 检查最终的损失值
         # 在log前检查 ratio 是否接近0
         ratio = numerator / (denominator + 1e-9)  # 增加一个小的epsilon防止除以0
-        if batch_idx <= 1:
-            check_tensor("ratio (log输入)", ratio)
-            if (ratio < 1e-20).any():
-                print("  - [!!! 警告 !!!] ratio 中有非常接近于0的值，log会产生巨大负数!")
 
         loss_per_anchor = -torch.log(ratio)
-        if batch_idx <= 1:
-            check_tensor("loss_per_anchor (最终损失)", loss_per_anchor)
-            if (loss_per_anchor > 100).any():
-                print(
-                    f"  - [!!! 证据找到 !!!] 在批次 {int(batch_idx)} 中发现巨大损失值! 最大损失: {loss_per_anchor.max().item()}")
 
-        print("--- [调试] _compute_multi_positive_loss 结束 ---\n")
-        # ======================= 调试代码块 (结束) =======================
         return loss_per_anchor.mean()
 
     def forward(self, batch):
