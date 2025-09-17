@@ -129,80 +129,99 @@ class MultiTaskBrepNet(pl.LightningModule):
         self.instance_eval_data = [] # 用于链接预测评估
         self.instance_post_process_data = [] # 用于 rec/loc F1 评估
 
+    def on_after_backward(self):
+        # 这个函数在 .backward() 之后、optimizer.step() 之前被调用
+        batch_idx = self.trainer.global_step
+        if batch_idx == 0:  # 只在第一个批次检查
+            print("\n--- [调试] on_after_backward (在首次权重更新前) ---")
+
+            # 检查关键层的梯度
+            target_layer = self.brep_encoder.graph_node_feature.linear_A
+            grad = target_layer.weight.grad
+
+            if grad is not None:
+                has_nan = torch.isnan(grad).any().item()
+                has_inf = torch.isinf(grad).any().item()
+                max_grad = torch.abs(grad).max().item()
+                print(f"  - linear_A 梯度的状态: NaN: {has_nan}, Inf: {has_inf}, 最大绝对值: {max_grad:.4f}")
+                if max_grad > 1000.0:
+                    print("  - [!!! 警告 !!!] 检测到非常大的梯度值，这可能导致权重更新不稳定！")
+            else:
+                print("  - linear_A 的梯度为 None")
+            print("--------------------------------------------------\n")
+
+    # ======================= 新增调试代码块 (结束) =======================
     def _compute_multi_positive_loss(self, embeddings, pos_edge_index):
-        # ======================= 在此插入调试代码 (开始) =======================
-        # 目标：检查是否存在零向量，因为这是导致 F.normalize 产生 NaN 的最直接原因。
+        # ======================= 调试代码块 (开始) =======================
+        # 目标: 检查所有关键中间变量，验证是否存在数值爆炸
+        print("\n--- [调试] 进入 _compute_multi_positive_loss ---")
+        batch_idx = self.trainer.global_step
 
-        # 1. 计算每个嵌入向量的 L2 范数（即向量的长度）
-        norms = torch.linalg.norm(embeddings, ord=2, dim=-1)
+        def check_tensor(name, tensor):
+            if not torch.is_tensor(tensor) or tensor.numel() == 0:
+                print(f"  - {name}: 非张量或为空")
+                return
+            has_nan = torch.isnan(tensor).any().item()
+            has_inf = torch.isinf(tensor).any().item()
+            print(
+                f"  - {name}: Shape: {tensor.shape}, NaN: {has_nan}, Inf: {has_inf}, Max: {tensor.max().item():.4f}, Min: {tensor.min().item():.4f}")
+            if has_nan or has_inf:
+                print(f"  - [!!!] 在 {name} 中发现无效值!")
 
-        # 2. 查找范数接近于零（或等于零）的向量
-        # 我们使用一个很小的阈值来捕获数值上的下溢
-        zero_norm_indices = torch.where(norms < 1e-9)[0]
+        if batch_idx <= 1:  # 只在前两个批次打印详细日志
+            print(f"\n--- 批次 {int(batch_idx)} 的详细计算过程 ---")
+            check_tensor("输入 embeddings", embeddings)
 
-        # 3. 如果找到了零向量，则打印详细的调试信息
-        if len(zero_norm_indices) > 0:
-            print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            print("!!!   调试捕获: 在 instance_embeddings 中发现零向量   !!!")
-            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            print(f"当前批次中，共发现 {len(zero_norm_indices)} 个零向量。")
-            print(f"这会导致 F.normalize 操作因除以零而产生 NaN。")
-            # 打印出前5个有问题的向量的索引及其范数值，以便追踪
-            for i in range(min(5, len(zero_norm_indices))):
-                idx = zero_norm_indices[i]
-                print(f"  - 向量索引: {idx.item()}, 其范数值: {norms[idx].item()}")
-            print("--------------------------------------------------------\n")
-        # ======================= 在此插入调试代码 (结束) =======================
-        embeddings = F.normalize(embeddings, p=2, dim=-1)
+        # 1. 检查归一化后的 embeddings
+        normalized_embeddings = F.normalize(embeddings, p=2, dim=-1)
+        if batch_idx <= 1:
+            check_tensor("归一化后 embeddings", normalized_embeddings)
+
         if pos_edge_index.numel() == 0:
+            print("  - pos_edge_index 为空, 返回损失 0.0")
             return torch.tensor(0.0, device=embeddings.device)
 
         unique_anchors_indices, inverse_indices = torch.unique(pos_edge_index[0], return_inverse=True)
-        anchor_embeddings = embeddings[unique_anchors_indices]
+        anchor_embeddings = normalized_embeddings[unique_anchors_indices]
 
-        all_embeddings = embeddings
+        all_embeddings = normalized_embeddings
         sim_matrix = torch.matmul(anchor_embeddings, all_embeddings.t()) / self.temperature
+        if batch_idx <= 1:
+            check_tensor("sim_matrix (相似度矩阵)", sim_matrix)
 
-        # ======================= 调试代码块 (开始) =======================
-        # 打印进入指数函数前 sim_matrix 的统计信息
-        sim_matrix_max_val = torch.max(sim_matrix).item()
-        sim_matrix_min_val = torch.min(sim_matrix).item()
-        print(f"\n--- 内部调试: _compute_multi_positive_loss ---")
-        print(f"sim_matrix max/min: {sim_matrix_max_val:.4f} / {sim_matrix_min_val:.4f}")
-        # ======================= 调试代码块 (结束) =======================
+        # 2. 检查 exp 指数操作后的结果
+        # 这是最容易发生数值溢出的地方
+        exp_sim_matrix = torch.exp(sim_matrix)
+        if batch_idx <= 1:
+            check_tensor("exp_sim_matrix (指数化后)", exp_sim_matrix)
 
-        sim_matrix_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
-        sim_matrix = sim_matrix - sim_matrix_max.detach()
-
+        # 3. 检查分子和分母
         pos_mask = torch.zeros_like(sim_matrix, dtype=torch.bool)
         pos_mask[inverse_indices, pos_edge_index[1]] = True
 
-        exp_sim_matrix = torch.exp(sim_matrix)
-
-        # ======================= 调试代码块 (开始) =======================
-        # 检查 exp_sim_matrix 是否包含 inf
-        has_inf = torch.isinf(exp_sim_matrix).any().item()
-        if has_inf:
-            print(f"警告: exp_sim_matrix 中检测到无穷大(inf)值！")
-
         denominator = exp_sim_matrix.sum(dim=1)
         numerator = (exp_sim_matrix * pos_mask).sum(dim=1)
+        if batch_idx <= 1:
+            check_tensor("分母 denominator", denominator)
+            check_tensor("分子 numerator", numerator)
 
-        # 检查分子或分母是否为零
-        if (denominator == 0).any().item():
-            print(f"警告: denominator 中检测到零值！")
-        if (numerator == 0).any().item():
-            # 注意：分子为零是正常情况，但在这里打印出来有助于观察
-            print(f"信息: numerator 中存在零值。")
-        print(f"-------------------------------------------\n")
+        # 4. 检查最终的损失值
+        # 在log前检查 ratio 是否接近0
+        ratio = numerator / (denominator + 1e-9)  # 增加一个小的epsilon防止除以0
+        if batch_idx <= 1:
+            check_tensor("ratio (log输入)", ratio)
+            if (ratio < 1e-20).any():
+                print("  - [!!! 警告 !!!] ratio 中有非常接近于0的值，log会产生巨大负数!")
+
+        loss_per_anchor = -torch.log(ratio)
+        if batch_idx <= 1:
+            check_tensor("loss_per_anchor (最终损失)", loss_per_anchor)
+            if (loss_per_anchor > 100).any():
+                print(
+                    f"  - [!!! 证据找到 !!!] 在批次 {int(batch_idx)} 中发现巨大损失值! 最大损失: {loss_per_anchor.max().item()}")
+
+        print("--- [调试] _compute_multi_positive_loss 结束 ---\n")
         # ======================= 调试代码块 (结束) =======================
-
-        loss_per_anchor = -torch.log(numerator / (denominator + 1e-7))
-        #检测 loss_per_anchor 是否包含 NaN 或 inf
-        if torch.isnan(loss_per_anchor).any().item():
-            print(f"警告: loss_per_anchor 中检测到 NaN 值！")
-        if torch.isinf(loss_per_anchor).any().item():
-            print(f"警告: loss_per_anchor 中检测到无穷大(inf)值！")
         return loss_per_anchor.mean()
 
     def forward(self, batch):
@@ -230,48 +249,9 @@ class MultiTaskBrepNet(pl.LightningModule):
         return semantic_logits, instance_embeddings, semantic_nodes, instance_nodes
 
     def training_step(self, batch, batch_idx):
-
-
         self.train()
         semantic_logits, instance_embeddings, semantic_nodes, instance_nodes = self.forward(batch)
-        # ======================= 在此插入最终调试代码 (开始) =======================
-        # 目标：在前向传播刚一结束，就立刻检查 instance_embeddings 是否包含 inf 或 NaN。
-        # 这是捕获问题的最上游位置。
 
-        # 1. 使用 torch.isfinite() 检查是否存在无穷大 (inf) 或无效数字 (NaN)
-        is_finite = torch.all(torch.isfinite(instance_embeddings))
-
-        # 2. 如果张量中存在非有限值，则触发调试信息
-        if not is_finite:
-            print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            print("!!!   调试捕获: forward() 的输出 instance_embeddings 包含无效值   !!!")
-            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            print(f"在训练批次 {batch_idx}，模型权重在更新后可能变得不稳定。")
-
-            # 找出具体是哪种无效值
-            has_nan = torch.isnan(instance_embeddings).any()
-            has_inf = torch.isinf(instance_embeddings).any()
-
-            if has_nan:
-                print("-  检测到 NaN 值。")
-            if has_inf:
-                print("-  检测到 Inf (无穷大) 值。这是导致 NaN 的根本原因。")
-
-            # 打印一些统计信息帮助分析
-            print(f"张量维度: {instance_embeddings.shape}")
-
-            # 为了避免打印过多数据，我们只显示一部分有问题的值
-            inf_indices = torch.where(torch.isinf(instance_embeddings))
-            if len(inf_indices[0]) > 0:
-                print(f"前 5 个 Inf 值的坐标 (行, 列):")
-                for i in range(min(5, len(inf_indices[0]))):
-                    row, col = inf_indices[0][i], inf_indices[1][i]
-                    print(f"  - ({row.item()}, {col.item()})")
-
-            print("----------------------------------------------------------------\n")
-            # 直接返回，跳过这个批次的损失计算和反向传播，防止程序崩溃
-            return None
-        # ======================= 在此插入最终调试代码 (结束) =======================
         if semantic_logits.numel() == 0: return None
 
         semantic_labels = batch["label_feature"].long()
@@ -293,29 +273,40 @@ class MultiTaskBrepNet(pl.LightningModule):
                 instance_features_norm = F.normalize(instance_features_valid, p=2, dim=1)
                 cos_sim = (semantic_features_norm * instance_features_norm).sum(dim=1)
                 loss_ortho = torch.mean(cos_sim ** 2)
-            
+
             loss_semantic_fp32 = loss_semantic.float()
             loss_instance_fp32 = loss_instance.float()
 
-            # ======================= 调试代码块 (开始) =======================
-
-            # 检查是否有NaN或无穷大值
-            if torch.isnan(loss_semantic_fp32) or torch.isinf(loss_semantic_fp32):
-                print(f"警告: 在批次 {batch_idx} 中 loss_semantic_fp32 出现无效值!")
-            if torch.isnan(loss_instance_fp32) or torch.isinf(loss_instance_fp32):
-                print(f"警告: 在批次 {batch_idx} 中 loss_instance_fp32 出现无效值!")
-            print(f"----------------\n")
-            # ======================= 调试代码块 (结束) =======================
-            main_loss = self.semantic_loss_weight * loss_semantic_fp32 + (1 - self.semantic_loss_weight) * loss_instance_fp32
-
+            main_loss = self.semantic_loss_weight * loss_semantic_fp32 + (
+                        1 - self.semantic_loss_weight) * loss_instance_fp32
             total_loss = main_loss + self.ortho_loss_weight * loss_ortho
+
+        # ======================= 最终调试代码 (开始) =======================
+        # 在 optimizer.step() 即将发生之前，检查学习率
+        if batch_idx in [0, 1]:  # 只检查前两个批次
+            # 获取当前的优化器
+            opt = self.optimizers()
+            # 获取学习率
+            current_lr = opt.param_groups[0]['lr']
+            print(f"\n--- [调试] training_step (批次 {batch_idx}, 更新前) ---")
+            print(f"  - 当前学习率 (current_lr): {current_lr}")
+            if not np.isfinite(current_lr):
+                print("  - [!!! 决定性证据 !!!] 学习率是 NaN 或 Inf！这就是导致权重被污染的原因！")
+            print("--------------------------------------------------\n")
+        # ======================= 最终调试代码 (结束) =======================
 
         batch_size = batch["padding_mask"].shape[0]
         self.log("train_loss", total_loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.log("train_loss_semantic", loss_semantic, on_step=False, on_epoch=True)
         self.log("train_loss_instance", loss_instance, on_step=False, on_epoch=True)
         self.log("train_loss_ortho", loss_ortho, on_step=False, on_epoch=True)
-        return total_loss
+
+        # 只有当损失值是有效的时候才返回，防止 NaN 损失污染 Lightning 的内部状态
+        if torch.isfinite(total_loss):
+            return total_loss
+        else:
+            print(f"\n[!!!] 在批次 {batch_idx} 检测到无效的总损失值 (NaN/Inf)，跳过此批次的更新。")
+            return None
 
     def validation_step(self, batch, batch_idx):
         self.eval()
