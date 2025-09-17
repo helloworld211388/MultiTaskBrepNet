@@ -328,7 +328,7 @@ class BrepEncoder(nn.Module):
                 print(f"\n--- BrepEncoder 调试 (3): 共享层 {i + 1}/{len(self.shared_layers)} 的输出 'x' 包含无效值 ---")
                 # 如果发现无效值，立即返回，防止后续代码崩溃
                 nan_tensor = torch.full_like(x, float('nan'))
-                return nan_tensor, nan_tensor, nan_tensor, torch.full_like(x[0, :, :], float('nan'))
+                # return nan_tensor, nan_tensor, nan_tensor, torch.full_like(x[0, :, :], float('nan'))
             # =====================================================================================
 
         shared_features = x
@@ -349,7 +349,7 @@ class BrepEncoder(nn.Module):
                 print(
                     f"\n--- BrepEncoder 调试 (4): 语义层 {i + 1}/{len(self.semantic_layers)} 的输出 'semantic_x' 包含无效值 ---")
                 nan_tensor = torch.full_like(x, float('nan'))
-                return nan_tensor, nan_tensor, nan_tensor, torch.full_like(x[0, :, :], float('nan'))
+                # return nan_tensor, nan_tensor, nan_tensor, torch.full_like(x[0, :, :], float('nan'))
             # =====================================================================================
 
         semantic_features = self.tanh(semantic_x)
@@ -368,7 +368,7 @@ class BrepEncoder(nn.Module):
                 print(
                     f"\n--- BrepEncoder 调试 (5): 实例层 {i + 1}/{len(self.instance_layers)} 的输出 'instance_x' 包含无效值 ---")
                 nan_tensor = torch.full_like(x, float('nan'))
-                return nan_tensor, nan_tensor, nan_tensor, torch.full_like(x[0, :, :], float('nan'))
+                # return nan_tensor, nan_tensor, nan_tensor, torch.full_like(x[0, :, :], float('nan'))
             # =====================================================================================
 
         instance_features = self.tanh(instance_x)

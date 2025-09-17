@@ -234,64 +234,118 @@ class GraphNodeFeature(nn.Module):
                 centroid, curvature, inner_loops, adj_stats, rational,
                 EigVecs, EigVals,
                 padding_mask):
+
+        # ======================= 调试代码块 (开始) =======================
+        # 目标: 逐一检查输入和中间变量，找到第一个出现 NaN/inf 的地方
+
+        print("\n--- [调试] 进入 GraphNodeFeature.forward ---")
+
+        def check_tensor(name, tensor):
+            if not isinstance(tensor, torch.Tensor):
+                print(f"  - {name}: 不是一个张量 (类型: {type(tensor)})")
+                return
+
+            # is_initialized = tensor.is_cuda and tensor.storage().size() > 0 # 检查是否已初始化
+            # if not is_initialized:
+            #      print(f"  - {name}: 张量未初始化!")
+            #      return
+
+            has_nan = torch.isnan(tensor).any().item()
+            has_inf = torch.isinf(tensor).any().item()
+
+            if has_nan or has_inf:
+                print(f"  - [!!! 问题定位 !!!] {name}: 包含无效值! NaN: {has_nan}, Inf: {has_inf}")
+            else:
+                # 只对非空张量计算统计值
+                if tensor.numel() > 0:
+                    print(
+                        f"  - {name}: 状态正常. Shape: {tensor.shape}, Min: {tensor.min().item():.4f}, Max: {tensor.max().item():.4f}, Mean: {tensor.mean().item():.4f}")
+                else:
+                    print(f"  - {name}: 状态正常. Shape: {tensor.shape} (空张量)")
+
+        # 1. 检查原始输入
+        print("\n--- 1. 检查从数据加载器传入的原始张量 ---")
+        check_tensor("输入: x (UV grid)", x)
+        check_tensor("输入: face_area", face_area)
+        check_tensor("输入: centroid", centroid)
+        check_tensor("输入: inner_loops", inner_loops)
+        check_tensor("输入: adj_stats", adj_stats)
+        check_tensor("输入: EigVecs", EigVecs)
+        check_tensor("输入: EigVals", EigVals)
+
         n_graph, n_node = padding_mask.size()[:2]
         node_pos = torch.where(padding_mask == False)
 
-        # ======================= 核心修复 (开始) =======================
-        # 1. 对特征向量进行归一化 (L2-Normalization)，防止出现极大值
-        #    为避免除以零，在分母上增加一个极小值 epsilon
-        eig_vecs_norm = F.normalize(EigVecs, p=2, dim=1, eps=1e-12)
+        # 2. 检查LPE计算过程
+        print("\n--- 2. 检查LPE (拉普拉斯位置编码) 计算过程 ---")
+        EigVecs_safe = torch.nan_to_num(EigVecs, nan=0.0, posinf=0.0, neginf=0.0)
+        EigVals_safe = torch.nan_to_num(EigVals, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # 2. 对特征值进行范围限制 (Clamping)，防止极端值
-        #    将特征值限制在一个合理的范围内，例如 [-100, 100]
-        eig_vals_clamped = torch.clamp(EigVals, min=-100.0, max=100.0)
-        # ======================= 核心修复 (结束) =======================
+        eig_vecs_norm = F.normalize(EigVecs_safe, p=2, dim=1, eps=1e-12)
+        check_tensor("LPE: eig_vecs_norm (归一化后)", eig_vecs_norm)
 
-        # 准备LPE输入
+        eig_vals_clamped = torch.clamp(EigVals_safe, min=-100.0, max=100.0)
         num_nodes_per_graph = (~padding_mask).sum(dim=1)
-
-        # 使用处理后的特征值
         EigVals_repeated = torch.repeat_interleave(eig_vals_clamped, num_nodes_per_graph, dim=0)
 
-        # 使用处理后的特征向量
         PosEnc = torch.cat(
             (eig_vecs_norm.unsqueeze(2), EigVals_repeated.unsqueeze(2)), dim=2
         ).float()
+        check_tensor("LPE: PosEnc (拼接后)", PosEnc)
 
         empty_mask = torch.isnan(PosEnc)
         PosEnc[empty_mask] = 0
-
-        # 线性映射和维度转换
         PosEnc = torch.transpose(PosEnc, 0, 1).float()
         PosEnc = self.linear_A(PosEnc)
+        check_tensor("LPE: PosEnc (linear_A后)", PosEnc)
 
-        # 通过Transformer学习位置编码
         PosEnc = self.PE_Transformer(src=PosEnc, src_key_padding_mask=empty_mask[:, :, 0])
+        check_tensor("LPE: PosEnc (Transformer后)", PosEnc)
 
-        # 移除被mask的部分并进行池化
         PosEnc[torch.transpose(empty_mask, 0, 1)[:, :, 0]] = float('nan')
         PosEnc = torch.nansum(PosEnc, 0, keepdim=False)
+        PosEnc = torch.nan_to_num(PosEnc, nan=0.0, posinf=0.0, neginf=0.0)
+        check_tensor("LPE: PosEnc (最终)", PosEnc)
 
-        # 通过原有的编码器
+        # 3. 检查其他特征编码器
+        print("\n--- 3. 检查其他特征编码器的输出 ---")
         x = x.permute(0, 3, 1, 2)
         x_ = self.surf_encoder(x)
+        check_tensor("特征: x_ (surf_encoder)", x_)
+
         face_area_ = self.face_area_encoder(face_area.unsqueeze(dim=1))
+        check_tensor("特征: face_area_", face_area_)
+
         face_type_ = self.face_type_encoder(face_type)
         face_loop_ = self.face_loop_encoder(face_loop)
         face_degree_ = self.degree_encoder(face_degree)
+
         centroid_ = self.centroid_encoder(centroid)
+        check_tensor("特征: centroid_", centroid_)
+
         curvature_ = self.curvature_encoder(curvature)
+
         inner_loops_ = self.inner_loops_encoder(inner_loops)
+        check_tensor("特征: inner_loops_", inner_loops_)
+
         adj_stats_ = self.adj_stats_encoder(adj_stats)
+        check_tensor("特征: adj_stats_", adj_stats_)
+
         rational_ = self.rational_encoder(rational)
 
-        # 拼接所有特征
+        # 4. 检查最终拼接的特征
+        print("\n--- 4. 检查最终拼接的节点特征 ---")
         node_feature = torch.cat((
             x_, face_area_, face_type_, face_loop_, face_degree_,
             centroid_, curvature_, inner_loops_, rational_, adj_stats_,
             PosEnc
         ), dim=-1)
+        check_tensor("最终: node_feature", node_feature)
 
+        print("--- [调试] GraphNodeFeature.forward 结束 ---\n")
+        # ======================= 调试代码块 (结束) =======================
+
+        # --- 原有的 forward 逻辑 ---
         face_feature = torch.zeros([n_graph, n_node, self.hidden_dim], device=x.device, dtype=x.dtype)
         face_feature[node_pos] = node_feature[:]
 

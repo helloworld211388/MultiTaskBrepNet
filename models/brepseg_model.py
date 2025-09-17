@@ -198,6 +198,11 @@ class MultiTaskBrepNet(pl.LightningModule):
         # ======================= 调试代码块 (结束) =======================
 
         loss_per_anchor = -torch.log(numerator / (denominator + 1e-7))
+        #检测 loss_per_anchor 是否包含 NaN 或 inf
+        if torch.isnan(loss_per_anchor).any().item():
+            print(f"警告: loss_per_anchor 中检测到 NaN 值！")
+        if torch.isinf(loss_per_anchor).any().item():
+            print(f"警告: loss_per_anchor 中检测到无穷大(inf)值！")
         return loss_per_anchor.mean()
 
     def forward(self, batch):
