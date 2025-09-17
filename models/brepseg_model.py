@@ -98,7 +98,7 @@ class MultiTaskBrepNet(pl.LightningModule):
 
         self.brep_encoder = BrepEncoder(
             num_degree=512, num_spatial=64, num_edge_dis=64,
-            edge_type="multi_hop", multi_hop_max_dist=16,
+            edge_type="multi_hop", multi_hop_max_dist=16,#在这里启用了 multi-hop 边，如果是这个值，那么就不会有边偏置
             num_shared_layers=getattr(args, 'num_shared_layers', 4),
             num_semantic_layers=getattr(args, 'num_semantic_layers', 3),
             num_instance_layers=getattr(args, 'num_instance_layers', 4),
@@ -129,28 +129,7 @@ class MultiTaskBrepNet(pl.LightningModule):
         self.instance_eval_data = [] # 用于链接预测评估
         self.instance_post_process_data = [] # 用于 rec/loc F1 评估
 
-    def on_after_backward(self):
-        # 这个函数在 .backward() 之后、optimizer.step() 之前被调用
-        batch_idx = self.trainer.global_step
-        if batch_idx == 0:  # 只在第一个批次检查
-            print("\n--- [调试] on_after_backward (在首次权重更新前) ---")
 
-            # 检查关键层的梯度
-            target_layer = self.brep_encoder.graph_node_feature.linear_A
-            grad = target_layer.weight.grad
-
-            if grad is not None:
-                has_nan = torch.isnan(grad).any().item()
-                has_inf = torch.isinf(grad).any().item()
-                max_grad = torch.abs(grad).max().item()
-                print(f"  - linear_A 梯度的状态: NaN: {has_nan}, Inf: {has_inf}, 最大绝对值: {max_grad:.4f}")
-                if max_grad > 1000.0:
-                    print("  - [!!! 警告 !!!] 检测到非常大的梯度值，这可能导致权重更新不稳定！")
-            else:
-                print("  - linear_A 的梯度为 None")
-            print("--------------------------------------------------\n")
-
-    # ======================= 新增调试代码块 (结束) =======================
     def _compute_multi_positive_loss(self, embeddings, pos_edge_index):
 
         normalized_embeddings = F.normalize(embeddings, p=2, dim=-1)
@@ -237,19 +216,7 @@ class MultiTaskBrepNet(pl.LightningModule):
                         1 - self.semantic_loss_weight) * loss_instance_fp32
             total_loss = main_loss + self.ortho_loss_weight * loss_ortho
 
-        # ======================= 最终调试代码 (开始) =======================
-        # 在 optimizer.step() 即将发生之前，检查学习率
-        if batch_idx in [0, 1]:  # 只检查前两个批次
-            # 获取当前的优化器
-            opt = self.optimizers()
-            # 获取学习率
-            current_lr = opt.param_groups[0]['lr']
-            print(f"\n--- [调试] training_step (批次 {batch_idx}, 更新前) ---")
-            print(f"  - 当前学习率 (current_lr): {current_lr}")
-            if not np.isfinite(current_lr):
-                print("  - [!!! 决定性证据 !!!] 学习率是 NaN 或 Inf！这就是导致权重被污染的原因！")
-            print("--------------------------------------------------\n")
-        # ======================= 最终调试代码 (结束) =======================
+
 
         batch_size = batch["padding_mask"].shape[0]
         self.log("train_loss", total_loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)

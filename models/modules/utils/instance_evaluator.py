@@ -1,7 +1,9 @@
 import torch
 import numpy as np
 import networkx as nx
-from typing import List, Dict, Tuple
+from typing import List, Tuple
+from sklearn.cluster import MeanShift, estimate_bandwidth
+import umap
 
 # AAGNet中的常量，用于评估
 EPS = 1e-6
@@ -24,32 +26,76 @@ def post_process_instances(
         data_id: int = -1
 ) -> List[FeatureInstance]:
     """
-    使用基于相似度阈值的方法对实例进行后处理。
+    结合MeanShift聚类和相似度矩阵对实例进行后处理。
+    参考 aagnet/predict_on_MFInstseg.py 的逻辑。
     """
+    num_faces = instance_embeddings.shape[0]
+    print(f"DEBUG: Attempting to process sample ID [{data_id}] which has [{num_faces}] faces.")
+
     if instance_embeddings.numel() == 0:
         return []
 
-    # 归一化嵌入向量
+    # 1. 归一化嵌入向量
     instance_embeddings = torch.nn.functional.normalize(instance_embeddings, p=2, dim=1)
-
-    # 计算相似度矩阵
-    similarity_matrix = torch.matmul(instance_embeddings, instance_embeddings.T)
-
-    # 基于相似度阈值构建图
-    num_faces = instance_embeddings.shape[0]
-    graph = nx.Graph()
-    graph.add_nodes_from(range(num_faces))
-
-    adj_matrix = (similarity_matrix > similarity_threshold).cpu().numpy()
-    rows, cols = np.where(adj_matrix)
-    edges = zip(rows.tolist(), cols.tolist())
-    graph.add_edges_from(edges)
-
-    # 寻找连通分量作为实例分组
-    clustered_instances = list(nx.connected_components(graph))
-
+    embeddings_np = instance_embeddings.cpu().numpy()
     semantic_preds_np = torch.argmax(semantic_logits, dim=-1).cpu().numpy()
 
+    # 2. MeanShift聚类
+    try:
+        if embeddings_np.shape[0] < 15:
+            print(f"DEBUG: Low face count ({embeddings_np.shape[0]}) for sample ID [{data_id}]. UMAP might fail.")
+
+        reducer = umap.UMAP(
+            n_neighbors=min(15, embeddings_np.shape[0] - 1) if embeddings_np.shape[0] > 1 else 1,
+            n_components=32,
+            min_dist=0.0,
+            random_state=42,
+        )
+        embeddings_reduced_np = reducer.fit_transform(embeddings_np)
+
+        bandwidth = estimate_bandwidth(embeddings_reduced_np, quantile=0.3)
+        if bandwidth is None or bandwidth <= 1e-6:
+            print(f"DEBUG: Bandwidth too small for sample ID [{data_id}]. Skipping.")
+            return []
+
+        ms = MeanShift(bandwidth=bandwidth, bin_seeding=True)
+        ms.fit(embeddings_reduced_np)
+        cluster_labels = ms.labels_
+    except Exception as e:
+        print("\n" + "=" * 50)
+        print(f"!!! DEBUG: An error occurred during MeanShift for sample ID [{data_id}] with [{num_faces}] faces. !!!")
+        print(f"Error Type: {type(e).__name__}")
+        print(f"Error Message: {e}")
+        print("This sample will be skipped.")
+        print("=" * 50 + "\n")
+        return []
+
+    # 3. 基于MeanShift结果构建相似度矩阵
+    num_faces = embeddings_np.shape[0]
+    ms_similarity_matrix = np.zeros((num_faces, num_faces))
+    unique_labels = np.unique(cluster_labels)
+    for label in unique_labels:
+        if label == -1:
+            continue
+        face_indices = np.where(cluster_labels == label)[0]
+        # 在同一个簇内的面，互相之间相似度为1
+        for i in range(len(face_indices)):
+            for j in range(i, len(face_indices)):
+                ms_similarity_matrix[face_indices[i], face_indices[j]] = 1
+                ms_similarity_matrix[face_indices[j], face_indices[i]] = 1
+
+    # 4. 基于嵌入向量计算的相似度矩阵
+    pred_similarity_matrix = torch.matmul(instance_embeddings, instance_embeddings.T).cpu().numpy()
+    pred_similarity_matrix_int = (pred_similarity_matrix > similarity_threshold).astype(int)
+
+    # 5. 求两个矩阵的交集
+    combined_matrix = np.multiply(ms_similarity_matrix, pred_similarity_matrix_int)
+
+    # 6. 使用交集矩阵构建图并寻找连通分量
+    graph = nx.from_numpy_array(combined_matrix)
+    clustered_instances = list(nx.connected_components(graph))
+
+    # 7. 多数投票决定实例类别
     predicted_features = []
     for instance_faces_set in clustered_instances:
         instance_faces = np.array(list(instance_faces_set))
@@ -57,13 +103,11 @@ def post_process_instances(
 
         # 过滤掉基面等非特征类别
         valid_semantic_preds = valid_semantic_preds[valid_semantic_preds < 24]
-
         if len(valid_semantic_preds) == 0:
             continue
 
         # 通过多数投票决定实例的类别
         instance_class = np.bincount(valid_semantic_preds).argmax()
-
         predicted_features.append(FeatureInstance(name=instance_class, faces=instance_faces))
 
     return predicted_features

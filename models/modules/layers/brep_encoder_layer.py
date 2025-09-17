@@ -452,6 +452,8 @@ class GraphAttnBias(nn.Module):
         n_graph, n_node = edge_path.size()[:2]
 
         graph_attn_bias = attn_bias.clone()
+
+
         graph_attn_bias = graph_attn_bias.unsqueeze(1).repeat(1, self.num_heads, 1, 1)
         # [n_graph, n_head, n_node+1, n_node+1]
 
@@ -462,15 +464,15 @@ class GraphAttnBias(nn.Module):
 
         # 2. D2 距离编码
         d2_distance = d2_distance.reshape(-1, 64)
-        d2_pos_bias = self.d2_pos_encoder(d2_distance).reshape(n_graph, n_node, n_node, self.num_heads).permute(0, 3, 1,
-                                                                                                                2)
+        d2_pos_bias = self.d2_pos_encoder(d2_distance).reshape(n_graph, n_node, n_node, self.num_heads).permute(0, 3, 1,2)
         graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + d2_pos_bias
+
 
         # 3. A3 角度编码
         ang_distance = ang_distance.reshape(-1, 64)
-        ang_pos_bias = self.ang_pos_encoder(ang_distance).reshape(n_graph, n_node, n_node, self.num_heads).permute(0, 3,
-                                                                                                                   1, 2)
+        ang_pos_bias = self.ang_pos_encoder(ang_distance).reshape(n_graph, n_node, n_node, self.num_heads).permute(0, 3,1, 2)
         graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + ang_pos_bias
+
 
         # 4. 质心距离编码
         centroid_dist_with_channel = centroid_distance.unsqueeze(-1)
@@ -479,46 +481,57 @@ class GraphAttnBias(nn.Module):
         centroid_dist_bias = encoded_bias.reshape(n_graph, n_node, n_node, self.num_heads).permute(0, 3, 1, 2)
         graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + centroid_dist_bias
 
+
         # 5. 边特征编码 (multi_hop)
-        # if self.edge_type == "multi_hop":
-        #     spatial_pos_ = spatial_pos.clone()
-        #     spatial_pos_[spatial_pos_ == 0] = 1
-        #     spatial_pos_ = torch.where(spatial_pos_ > 1, spatial_pos_ - 1, spatial_pos_)
-        #     spatial_pos_ = spatial_pos_.clamp(0, self.multi_hop_max_dist)
-        #
-        #     max_dist = self.multi_hop_max_dist
-        #     edge_data = edge_data.permute(0, 2, 1)
-        #     edge_data_ = self.curv_encoder(edge_data)
-        #     edge_type_ = self.edge_type_encoder(edge_type)
-        #     normalized_edge_len = torch.log1p(edge_len)
-        #     edge_len_ = self.edge_len_encoder(normalized_edge_len.unsqueeze(dim=1))
-        #     edge_ang_ = self.edge_ang_encoder(edge_ang.unsqueeze(dim=1))
-        #     edge_conv_ = self.edge_conv_encoder(edge_conv)
-        #     edge_feat = edge_data_ + edge_type_ + edge_len_ + edge_ang_ + edge_conv_
-        #
-        #     edge_feat_ = self.node_cat(graph, node_feat, edge_feat)
-        #
-        #     zero_feature = torch.zeros(1, edge_feat_.size(-1), device=edge_feat_.device, dtype=edge_feat_.dtype)
-        #     edge_feature_global = torch.cat([zero_feature, edge_feat_], dim=0)
-        #
-        #     edge_path_reshaped = edge_path.reshape(n_graph, n_node * n_node * max_dist)
-        #     edge_bias = edge_feature_global[edge_path_reshaped]
-        #     edge_bias = edge_bias.reshape(n_graph, n_node, n_node, max_dist, self.num_heads)
-        #
-        #     edge_bias = edge_bias.permute(3, 0, 1, 2, 4).reshape(max_dist, -1, self.num_heads)
-        #     edge_bias = torch.bmm(edge_bias, self.edge_dis_encoder[:max_dist, :, :])
-        #     edge_bias = edge_bias.reshape(max_dist, n_graph, n_node, n_node, self.num_heads).permute(1, 2, 3, 0, 4)
-        #     edge_bias = (edge_bias.sum(-2) / (spatial_pos_.float().unsqueeze(-1)))
-        #     edge_bias = edge_bias.permute(0, 3, 1, 2)
-        #     graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + edge_bias
+        if self.edge_type == "multi_hop":
+            spatial_pos_ = spatial_pos.clone()
+            spatial_pos_[spatial_pos_ == 0] = 1
+            #为什么要-1呢？因为spatial_pos表示的是最短路径距离，1表示直接相连的节点，大于1表示通过中间节点相连的节点(也就是不直接相邻的节点)
+            spatial_pos_ = torch.where(spatial_pos_ > 1, spatial_pos_ - 1, spatial_pos_)
+            spatial_pos_ = spatial_pos_.clamp(0, self.multi_hop_max_dist)
 
-        # --- 修改的核心逻辑: 在所有边相关的偏置计算完后，应用 gamma 缩放 ---
-        # 使用 spatial_pos (最短路径距离) 来识别虚拟边
-        # fake_edge_mask = (spatial_pos > 1).unsqueeze(1).repeat(1, self.num_heads, 1, 1)
+            max_dist = self.multi_hop_max_dist
+            edge_data = edge_data.permute(0, 2, 1)
+            edge_data_ = self.curv_encoder(edge_data)
+            edge_type_ = self.edge_type_encoder(edge_type)
+            normalized_edge_len = torch.log1p(edge_len)
+            edge_len_ = self.edge_len_encoder(normalized_edge_len.unsqueeze(dim=1))
+            edge_ang_ = self.edge_ang_encoder(edge_ang.unsqueeze(dim=1))
+            edge_conv_ = self.edge_conv_encoder(edge_conv)
+            edge_feat = edge_data_ + edge_type_ + edge_len_ + edge_ang_ + edge_conv_
 
-        # 对虚拟边对应的注意力偏置乘以 gamma
-        # graph_attn_bias[:, :, 1:, 1:][fake_edge_mask] *= self.gamma
-        # --- 修改结束 ---
+            edge_feat_ = self.node_cat(graph, node_feat, edge_feat)
+
+            zero_feature = torch.zeros(1, edge_feat_.size(-1), device=edge_feat_.device, dtype=edge_feat_.dtype)
+            edge_feature_global = torch.cat([zero_feature, edge_feat_], dim=0)
+
+            edge_path_reshaped = edge_path.reshape(n_graph, n_node * n_node * max_dist)
+            edge_bias = edge_feature_global[edge_path_reshaped]
+            edge_bias = edge_bias.reshape(n_graph, n_node, n_node, max_dist, self.num_heads)
+
+            edge_bias = edge_bias.permute(3, 0, 1, 2, 4).reshape(max_dist, -1, self.num_heads)
+            edge_bias = torch.bmm(edge_bias, self.edge_dis_encoder[:max_dist, :, :])
+            edge_bias = edge_bias.reshape(max_dist, n_graph, n_node, n_node, self.num_heads).permute(1, 2, 3, 0, 4)
+            edge_bias = (edge_bias.sum(-2) / (spatial_pos_.float().unsqueeze(-1)))
+            edge_bias = edge_bias.permute(0, 3, 1, 2)
+            graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + edge_bias
+
+        # 1. 识别虚拟边
+        fake_edge_mask = (spatial_pos > 1).unsqueeze(1).repeat(1, self.num_heads, 1, 1)
+
+        # 2. 从 graph_attn_bias 的节点部分创建有限值遮罩
+        #    我们只关心节点之间的交互，所以我们切片掉全局token的行和列 [:, :, 1:, 1:]
+        #    这确保了它的形状是 [batch, heads, n_node, n_node]，与 fake_edge_mask 匹配
+        finite_bias_mask = torch.isfinite(graph_attn_bias[:, :, 1:, 1:])
+
+        # 3. 结合两个遮罩，找到可以安全相乘的位置
+        multiplication_mask = fake_edge_mask & finite_bias_mask
+
+        # 4. 只在安全的位置执行乘法操作
+        #    注意：应用遮罩时，也必须应用在相同的切片上
+        safe_gamma = torch.sigmoid(self.gamma)
+        graph_attn_bias[:, :, 1:, 1:][multiplication_mask] *= safe_gamma
+
 
         # 6. 添加全局 Token 的偏置
         t = self.graph_token_virtual_distance.weight.view(1, self.num_heads, 1)

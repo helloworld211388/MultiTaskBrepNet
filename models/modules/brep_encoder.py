@@ -271,10 +271,6 @@ class BrepEncoder(nn.Module):
                                              batch_data["EigVals"],
                                              batch_data["padding_mask"])
 
-        # ======================= BrepEncoder 调试点 1: 检查初始节点特征 =======================
-        if not torch.all(torch.isfinite(x)):
-            print("\n--- BrepEncoder 调试 (1): 初始节点特征 'x' 包含无效值 ---")
-        # =================================================================================
 
         if perturb is not None:
             x[:, 1:, :] += perturb
@@ -295,10 +291,9 @@ class BrepEncoder(nn.Module):
                                          x_0
                                          )
 
-        # ======================= BrepEncoder 调试点 2: 检查注意力偏置 =======================
-        if not torch.all(torch.isfinite(attn_bias)):
-            print("\n--- BrepEncoder 调试 (2): 'attn_bias' 包含无效值 ---")
-        # =================================================================================
+
+
+
 
         padding_mask_cls = torch.zeros(n_graph, 1, device=padding_mask.device, dtype=padding_mask.dtype)
         padding_mask = torch.cat((padding_mask_cls, padding_mask), dim=1)
