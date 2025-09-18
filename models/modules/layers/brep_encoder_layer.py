@@ -468,19 +468,13 @@ class GraphAttnBias(nn.Module):
         # 释放不再需要的中间变量
         del spatial_pos_bias
 
-        # 2. D2 距离编码
-        d2_distance = d2_distance.reshape(-1, 64)
-        d2_pos_bias = self.d2_pos_encoder(d2_distance).reshape(n_graph, n_node, n_node, self.num_heads).permute(0, 3, 1,2)
-        graph_attn_bias[:, :, 1:, 1:] += d2_pos_bias
-        del d2_pos_bias
-
         neighbor_mask = (spatial_pos == 1)  # Shape: [n_graph, n_node, n_node]
         if not neighbor_mask.any():  # 如果没有任何邻居，则跳过昂贵计算
             pass
         else:
             # 2. D2 距离编码 (只为邻居计算)
             d2_neighbors = d2_distance[neighbor_mask]  # 只选择邻居对的特征
-            d2_pos_bias_neighbors = self.d2_pos_encoder(d2_neighbors)  # 计算偏置
+            d2_pos_bias_neighbors = self.d2_map_to_heads(self.d2_pos_encoder(d2_neighbors.reshape(-1, 64)))
 
             # 创建一个零矩阵，并将计算结果填充回去
             d2_pos_bias = torch.zeros(n_graph, n_node, n_node, self.num_heads, device=d2_distance.device)
@@ -490,7 +484,7 @@ class GraphAttnBias(nn.Module):
 
             # 3. A3 角度编码 (只为邻居计算)
             ang_neighbors = ang_distance[neighbor_mask]
-            ang_pos_bias_neighbors = self.ang_pos_encoder(ang_neighbors)
+            ang_pos_bias_neighbors = self.ang_map_to_heads(self.ang_pos_encoder(ang_neighbors.reshape(-1, 64)))
 
             ang_pos_bias = torch.zeros(n_graph, n_node, n_node, self.num_heads, device=ang_distance.device)
             ang_pos_bias[neighbor_mask] = ang_pos_bias_neighbors
