@@ -151,7 +151,7 @@ class CADSynth(Dataset):
     def _collate(self, batch):
         return collator(
             batch,
-            multi_hop_max_dist=16,
+            multi_hop_max_dist=12,#减少显存消耗
             spatial_pos_max=32,
         )
 

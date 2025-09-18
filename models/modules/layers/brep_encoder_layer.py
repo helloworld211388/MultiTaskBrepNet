@@ -421,10 +421,14 @@ class GraphAttnBias(nn.Module):
         self.graph_token_virtual_distance = nn.Embedding(1, num_heads)
 
         # D2 A3 encoder
-        # self.d2_pos_encoder = nn.Linear(64, num_heads, bias=False)
-        # self.ang_pos_encoder = nn.Linear(64, num_heads, bias=False)
-        self.d2_pos_encoder = NonLinear(64, num_heads)
-        self.ang_pos_encoder = NonLinear(64, num_heads)
+        proximity_embedding_dim = 16  # 定义一个更小的维度，以减少计算
+
+        # D2 A3 encoder
+        self.d2_pos_encoder = NonLinear(64, proximity_embedding_dim)
+        self.ang_pos_encoder = NonLinear(64, proximity_embedding_dim)
+        # 新增线性层用于维度映射
+        self.d2_map_to_heads = nn.Linear(proximity_embedding_dim, num_heads)
+        self.ang_map_to_heads = nn.Linear(proximity_embedding_dim, num_heads)
         # 【新增】为全局质心距离矩阵创建编码器
         self.centroid_dist_encoder = NonLinear(1, num_heads)
         # edge_feature encode
@@ -470,57 +474,96 @@ class GraphAttnBias(nn.Module):
         graph_attn_bias[:, :, 1:, 1:] += d2_pos_bias
         del d2_pos_bias
 
+        neighbor_mask = (spatial_pos == 1)  # Shape: [n_graph, n_node, n_node]
+        if not neighbor_mask.any():  # 如果没有任何邻居，则跳过昂贵计算
+            pass
+        else:
+            # 2. D2 距离编码 (只为邻居计算)
+            d2_neighbors = d2_distance[neighbor_mask]  # 只选择邻居对的特征
+            d2_pos_bias_neighbors = self.d2_pos_encoder(d2_neighbors)  # 计算偏置
 
-        # 3. A3 角度编码
-        ang_distance = ang_distance.reshape(-1, 64)
-        ang_pos_bias = self.ang_pos_encoder(ang_distance).reshape(n_graph, n_node, n_node, self.num_heads).permute(0, 3,1, 2)
-        # graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + ang_pos_bias
-        graph_attn_bias[:, :, 1:, 1:] += ang_pos_bias
-        del ang_pos_bias
+            # 创建一个零矩阵，并将计算结果填充回去
+            d2_pos_bias = torch.zeros(n_graph, n_node, n_node, self.num_heads, device=d2_distance.device)
+            d2_pos_bias[neighbor_mask] = d2_pos_bias_neighbors
+            graph_attn_bias[:, :, 1:, 1:] += d2_pos_bias.permute(0, 3, 1, 2)
+            del d2_pos_bias, d2_neighbors, d2_pos_bias_neighbors
 
-        # 4. 质心距离编码
-        centroid_dist_with_channel = centroid_distance.unsqueeze(-1)
-        reshaped_input = centroid_dist_with_channel.reshape(-1, 1)
-        encoded_bias = self.centroid_dist_encoder(reshaped_input)
-        centroid_dist_bias = encoded_bias.reshape(n_graph, n_node, n_node, self.num_heads).permute(0, 3, 1, 2)
-        # graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + centroid_dist_bias
-        graph_attn_bias[:, :, 1:, 1:] += centroid_dist_bias
-        del centroid_dist_bias
+            # 3. A3 角度编码 (只为邻居计算)
+            ang_neighbors = ang_distance[neighbor_mask]
+            ang_pos_bias_neighbors = self.ang_pos_encoder(ang_neighbors)
 
-        # 5. 边特征编码 (multi_hop)
+            ang_pos_bias = torch.zeros(n_graph, n_node, n_node, self.num_heads, device=ang_distance.device)
+            ang_pos_bias[neighbor_mask] = ang_pos_bias_neighbors
+            graph_attn_bias[:, :, 1:, 1:] += ang_pos_bias.permute(0, 3, 1, 2)
+            del ang_pos_bias, ang_neighbors, ang_pos_bias_neighbors
+
+            # 5. 边特征编码 (multi_hop)
         if self.edge_type == "multi_hop":
             spatial_pos_ = spatial_pos.clone()
             spatial_pos_[spatial_pos_ == 0] = 1
-            #为什么要-1呢？因为spatial_pos表示的是最短路径距离，1表示直接相连的节点，大于1表示通过中间节点相连的节点(也就是不直接相邻的节点)
+            # 为什么要-1呢？因为spatial_pos表示的是最短路径距离，1表示直接相连的节点，大于1表示通过中间节点相连的节点(也就是不直接相邻的节点)
             spatial_pos_ = torch.where(spatial_pos_ > 1, spatial_pos_ - 1, spatial_pos_)
             spatial_pos_ = spatial_pos_.clamp(0, self.multi_hop_max_dist)
 
-            max_dist = self.multi_hop_max_dist
-            edge_data = edge_data.permute(0, 2, 1)
-            edge_data_ = self.curv_encoder(edge_data)
-            edge_type_ = self.edge_type_encoder(edge_type)
-            normalized_edge_len = torch.log1p(edge_len)
-            edge_len_ = self.edge_len_encoder(normalized_edge_len.unsqueeze(dim=1))
-            edge_ang_ = self.edge_ang_encoder(edge_ang.unsqueeze(dim=1))
-            edge_conv_ = self.edge_conv_encoder(edge_conv)
-            edge_feat = edge_data_ + edge_type_ + edge_len_ + edge_ang_ + edge_conv_
+            # ==================== 核心优化：将稠密计算稀疏化 ====================
 
-            edge_feat_ = self.node_cat(graph, node_feat, edge_feat)
+            # 1. 创建一个掩码(mask)，只筛选出在最大距离限制内的有效路径对应的节点对。
+            #    这避免了为图中所有 N*N 对节点进行昂贵的计算。
+            valid_path_mask = (spatial_pos_ > 0) & (spatial_pos_ <= self.multi_hop_max_dist)
 
-            zero_feature = torch.zeros(1, edge_feat_.size(-1), device=edge_feat_.device, dtype=edge_feat_.dtype)
-            edge_feature_global = torch.cat([zero_feature, edge_feat_], dim=0)
+            # 如果整个批次中都没有需要计算的有效路径，则直接跳过，节省计算资源。
+            if valid_path_mask.any():
+                # 2. 像原来一样，计算所有边的基础特征。这部分计算量不大。
+                edge_data = edge_data.permute(0, 2, 1)
+                edge_data_ = self.curv_encoder(edge_data)
+                edge_type_ = self.edge_type_encoder(edge_type)
+                normalized_edge_len = torch.log1p(edge_len)
+                edge_len_ = self.edge_len_encoder(normalized_edge_len.unsqueeze(dim=1))
+                edge_ang_ = self.edge_ang_encoder(edge_ang.unsqueeze(dim=1))
+                edge_conv_ = self.edge_conv_encoder(edge_conv)
+                edge_feat = edge_data_ + edge_type_ + edge_len_ + edge_ang_ + edge_conv_
+                edge_feat_ = self.node_cat(graph, node_feat, edge_feat)
+                zero_feature = torch.zeros(1, edge_feat_.size(-1), device=edge_feat_.device, dtype=edge_feat_.dtype)
+                edge_feature_global = torch.cat([zero_feature, edge_feat_], dim=0)
 
-            edge_path_reshaped = edge_path.reshape(n_graph, n_node * n_node * max_dist)
-            edge_bias = edge_feature_global[edge_path_reshaped]
-            edge_bias = edge_bias.reshape(n_graph, n_node, n_node, max_dist, self.num_heads)
+                # 3. 创建一个空的偏置张量，用于填充计算结果。
+                edge_bias = torch.zeros(n_graph, n_node, n_node, self.num_heads, device=attn_bias.device)
 
-            edge_bias = edge_bias.permute(3, 0, 1, 2, 4).reshape(max_dist, -1, self.num_heads)
-            edge_bias = torch.bmm(edge_bias, self.edge_dis_encoder[:max_dist, :, :])
-            edge_bias = edge_bias.reshape(max_dist, n_graph, n_node, n_node, self.num_heads).permute(1, 2, 3, 0, 4)
-            edge_bias = (edge_bias.sum(-2) / (spatial_pos_.float().unsqueeze(-1)))
-            edge_bias = edge_bias.permute(0, 3, 1, 2)
-            graph_attn_bias[:, :, 1:, 1:] += edge_bias
-            del edge_bias
+                # 4. 只对掩码为True的位置（即稀疏的有效路径）进行计算。
+                #    首先获取这些有效路径的索引 (g, i, j)，其中 g, i, j 分别是图、源节点、目标节点的索引。
+                valid_indices = torch.where(valid_path_mask)
+
+                #    根据稀疏索引，从 edge_path 中只提取需要处理的路径。
+                #    这将生成一个更小的张量，形状为 [有效路径数, max_dist]。
+                paths_to_process = edge_path[valid_indices]
+
+                #    根据路径索引，从所有边特征中提取出对应路径上的边特征。
+                #    形状变为 [有效路径数, max_dist, num_heads]。
+                gathered_features = edge_feature_global[paths_to_process]
+
+                #    为了进行批处理矩阵乘法 (bmm)，调整张量形状。
+                bmm_input = gathered_features.permute(1, 0, 2)  # [max_dist, 有效路径数, num_heads]
+
+                #    执行矩阵乘法，这步的计算量相比原来已大幅减少。
+                bmm_output = torch.bmm(bmm_input, self.edge_dis_encoder[:self.multi_hop_max_dist, :, :])
+
+                #    将结果重新塑形并按路径上的边进行加和。
+                processed_bias = bmm_output.permute(1, 0, 2)  # [有效路径数, max_dist, num_heads]
+                summed_bias = processed_bias.sum(dim=1)
+
+                #    除以路径长度进行归一化。
+                path_lengths = spatial_pos_[valid_indices].float().unsqueeze(-1)
+                final_bias_for_paths = summed_bias / path_lengths
+
+                # 5. 将计算出的稀疏偏置结果，填充回之前创建的零矩阵中的正确位置。
+                edge_bias[valid_indices] = final_bias_for_paths
+
+                # 6. 将含有稀疏偏置的矩阵应用到总的注意力偏置上。
+                graph_attn_bias[:, :, 1:, 1:] += edge_bias.permute(0, 3, 1, 2)
+
+                # 7. 及时删除中间变量，释放显存。
+                del edge_bias, final_bias_for_paths, summed_bias, processed_bias, bmm_output
+                del gathered_features, paths_to_process, valid_indices, edge_feature_global
 
         # 1. 识别虚拟边
         fake_edge_mask = (spatial_pos > 1).unsqueeze(1).repeat(1, self.num_heads, 1, 1)

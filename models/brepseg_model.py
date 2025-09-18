@@ -97,8 +97,8 @@ class MultiTaskBrepNet(pl.LightningModule):
         self.temperature = getattr(args, 'temperature', 0.1)
 
         self.brep_encoder = BrepEncoder(
-            num_degree=512, num_spatial=64, num_edge_dis=64,
-            edge_type="multi_hop", multi_hop_max_dist=16,#在这里启用了 multi-hop 边，如果是这个值，那么就不会有边偏置
+            num_degree=512, num_spatial=64, num_edge_dis=12,
+            edge_type="multi_hop", multi_hop_max_dist=12,#在这里启用了 multi-hop 边，如果是这个值，那么就不会有边偏置
             num_shared_layers=getattr(args, 'num_shared_layers', 4),
             num_semantic_layers=getattr(args, 'num_semantic_layers', 3),
             num_instance_layers=getattr(args, 'num_instance_layers', 4),
