@@ -460,27 +460,32 @@ class GraphAttnBias(nn.Module):
         # 1. 空间位置编码 (spatial_pos)
         spatial_pos_bias = self.spatial_pos_encoder(spatial_pos)
         spatial_pos_bias = spatial_pos_bias.permute(0, 3, 1, 2)
-        graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + spatial_pos_bias
+        graph_attn_bias[:, :, 1:, 1:] += spatial_pos_bias
+        # 释放不再需要的中间变量
+        del spatial_pos_bias
 
         # 2. D2 距离编码
         d2_distance = d2_distance.reshape(-1, 64)
         d2_pos_bias = self.d2_pos_encoder(d2_distance).reshape(n_graph, n_node, n_node, self.num_heads).permute(0, 3, 1,2)
-        graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + d2_pos_bias
+        graph_attn_bias[:, :, 1:, 1:] += d2_pos_bias
+        del d2_pos_bias
 
 
         # 3. A3 角度编码
         ang_distance = ang_distance.reshape(-1, 64)
         ang_pos_bias = self.ang_pos_encoder(ang_distance).reshape(n_graph, n_node, n_node, self.num_heads).permute(0, 3,1, 2)
-        graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + ang_pos_bias
-
+        # graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + ang_pos_bias
+        graph_attn_bias[:, :, 1:, 1:] += ang_pos_bias
+        del ang_pos_bias
 
         # 4. 质心距离编码
         centroid_dist_with_channel = centroid_distance.unsqueeze(-1)
         reshaped_input = centroid_dist_with_channel.reshape(-1, 1)
         encoded_bias = self.centroid_dist_encoder(reshaped_input)
         centroid_dist_bias = encoded_bias.reshape(n_graph, n_node, n_node, self.num_heads).permute(0, 3, 1, 2)
-        graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + centroid_dist_bias
-
+        # graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + centroid_dist_bias
+        graph_attn_bias[:, :, 1:, 1:] += centroid_dist_bias
+        del centroid_dist_bias
 
         # 5. 边特征编码 (multi_hop)
         if self.edge_type == "multi_hop":
@@ -514,7 +519,8 @@ class GraphAttnBias(nn.Module):
             edge_bias = edge_bias.reshape(max_dist, n_graph, n_node, n_node, self.num_heads).permute(1, 2, 3, 0, 4)
             edge_bias = (edge_bias.sum(-2) / (spatial_pos_.float().unsqueeze(-1)))
             edge_bias = edge_bias.permute(0, 3, 1, 2)
-            graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + edge_bias
+            graph_attn_bias[:, :, 1:, 1:] += edge_bias
+            del edge_bias
 
         # 1. 识别虚拟边
         fake_edge_mask = (spatial_pos > 1).unsqueeze(1).repeat(1, self.num_heads, 1, 1)
