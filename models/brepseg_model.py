@@ -97,8 +97,8 @@ class MultiTaskBrepNet(pl.LightningModule):
         self.temperature = getattr(args, 'temperature', 0.1)
 
         self.brep_encoder = BrepEncoder(
-            num_degree=512, num_spatial=64, num_edge_dis=12,
-            edge_type="multi_hop", multi_hop_max_dist=12,#在这里启用了 multi-hop 边，如果是这个值，那么就不会有边偏置
+            num_degree=512, num_spatial=64, num_edge_dis=6,
+            edge_type="multi_hop", multi_hop_max_dist=6,#在这里启用了 multi-hop 边，如果是这个值，那么就不会有边偏置
             num_shared_layers=getattr(args, 'num_shared_layers', 4),
             num_semantic_layers=getattr(args, 'num_semantic_layers', 3),
             num_instance_layers=getattr(args, 'num_instance_layers', 4),
@@ -257,21 +257,21 @@ class MultiTaskBrepNet(pl.LightningModule):
             'num_nodes': num_nodes_total
         })
 
-        # --- 恢复：数据收集 Section 2: 用于 rec/loc F1 评估 ---
-        num_nodes_per_graph = batch['graph'].batch_num_nodes().cpu().tolist()
-        split_instance_embeddings = torch.split(instance_embeddings, num_nodes_per_graph, dim=0)
-        split_semantic_logits = torch.split(semantic_logits, num_nodes_per_graph, dim=0)
-        split_instance_labels_gt = torch.split(batch["instance_label"], num_nodes_per_graph, dim=0)
-        split_semantic_labels_gt = torch.split(batch["label_feature"], num_nodes_per_graph, dim=0)
-        split_ids = torch.split(batch["id"], 1)
-        for i in range(len(num_nodes_per_graph)):
-            self.instance_post_process_data.append({
-                'embeddings': split_instance_embeddings[i].cpu(),
-                'logits': split_semantic_logits[i].cpu(),
-                'instance_gt': split_instance_labels_gt[i].cpu(),
-                'semantic_gt': split_semantic_labels_gt[i].cpu(),
-                'id': split_ids[i].cpu().item(),
-            })
+        # # --- 恢复：数据收集 Section 2: 用于 rec/loc F1 评估 ---
+        # num_nodes_per_graph = batch['graph'].batch_num_nodes().cpu().tolist()
+        # split_instance_embeddings = torch.split(instance_embeddings, num_nodes_per_graph, dim=0)
+        # split_semantic_logits = torch.split(semantic_logits, num_nodes_per_graph, dim=0)
+        # split_instance_labels_gt = torch.split(batch["instance_label"], num_nodes_per_graph, dim=0)
+        # split_semantic_labels_gt = torch.split(batch["label_feature"], num_nodes_per_graph, dim=0)
+        # split_ids = torch.split(batch["id"], 1)
+        # for i in range(len(num_nodes_per_graph)):
+        #     self.instance_post_process_data.append({
+        #         'embeddings': split_instance_embeddings[i].cpu(),
+        #         'logits': split_semantic_logits[i].cpu(),
+        #         'instance_gt': split_instance_labels_gt[i].cpu(),
+        #         'semantic_gt': split_semantic_labels_gt[i].cpu(),
+        #         'id': split_ids[i].cpu().item(),
+        #     })
 
         # --- 损失计算 ---
         with autocast(enabled=False):
@@ -334,29 +334,29 @@ class MultiTaskBrepNet(pl.LightningModule):
             self.log("instance_ap_score", avg_ap, prog_bar=True)
             self.instance_eval_data.clear()
 
-        # --- 恢复：实例评估 Section 2: rec/loc F1 ---
-        if not self.instance_post_process_data:
-            self.log_dict({"rec_f1": 0.0, "loc_f1": 0.0})
-        else:
-            rec_predictions, rec_truelabels, rec_truepositives = np.zeros(24, dtype=int), np.zeros(24, dtype=int), np.zeros(24, dtype=int)
-            loc_predictions, loc_truelabels, loc_truepositives = np.zeros(24, dtype=int), np.zeros(24, dtype=int), np.zeros(24, dtype=int)
-            for data in self.instance_post_process_data:
-                predicted_features = evaluator.post_process_instances(instance_embeddings=data['embeddings'], semantic_logits=data['logits'], data_id=data.get('id', -1),)
-                gt_features = evaluator.parse_ground_truth(instance_labels=data['instance_gt'], semantic_labels=data['semantic_gt'])
-                pred, gt, tp = evaluator.cal_recognition_performance(predicted_features, gt_features)
-                rec_predictions += pred
-                rec_truelabels += gt
-                rec_truepositives += tp
-                pred, gt, tp = evaluator.cal_localization_performance(predicted_features, gt_features)
-                loc_predictions += pred
-                loc_truelabels += gt
-                loc_truepositives += tp
-            rec_precision, rec_recall = evaluator.eval_metric(rec_predictions, rec_truelabels, rec_truepositives)
-            rec_f1 = (2 * rec_precision.mean() * rec_recall.mean()) / (rec_precision.mean() + rec_recall.mean() + evaluator.EPS)
-            loc_precision, loc_recall = evaluator.eval_metric(loc_predictions, loc_truelabels, loc_truepositives)
-            loc_f1 = (2 * loc_precision.mean() * loc_recall.mean()) / (loc_precision.mean() + loc_recall.mean() + evaluator.EPS)
-            self.log_dict({"rec_f1": rec_f1, "loc_f1": loc_f1}, prog_bar=True)
-            self.instance_post_process_data.clear()
+        # # --- 恢复：实例评估 Section 2: rec/loc F1 ---
+        # if not self.instance_post_process_data:
+        #     self.log_dict({"rec_f1": 0.0, "loc_f1": 0.0})
+        # else:
+        #     rec_predictions, rec_truelabels, rec_truepositives = np.zeros(24, dtype=int), np.zeros(24, dtype=int), np.zeros(24, dtype=int)
+        #     loc_predictions, loc_truelabels, loc_truepositives = np.zeros(24, dtype=int), np.zeros(24, dtype=int), np.zeros(24, dtype=int)
+        #     for data in self.instance_post_process_data:
+        #         predicted_features = evaluator.post_process_instances(instance_embeddings=data['embeddings'], semantic_logits=data['logits'], data_id=data.get('id', -1),)
+        #         gt_features = evaluator.parse_ground_truth(instance_labels=data['instance_gt'], semantic_labels=data['semantic_gt'])
+        #         pred, gt, tp = evaluator.cal_recognition_performance(predicted_features, gt_features)
+        #         rec_predictions += pred
+        #         rec_truelabels += gt
+        #         rec_truepositives += tp
+        #         pred, gt, tp = evaluator.cal_localization_performance(predicted_features, gt_features)
+        #         loc_predictions += pred
+        #         loc_truelabels += gt
+        #         loc_truepositives += tp
+        #     rec_precision, rec_recall = evaluator.eval_metric(rec_predictions, rec_truelabels, rec_truepositives)
+        #     rec_f1 = (2 * rec_precision.mean() * rec_recall.mean()) / (rec_precision.mean() + rec_recall.mean() + evaluator.EPS)
+        #     loc_precision, loc_recall = evaluator.eval_metric(loc_predictions, loc_truelabels, loc_truepositives)
+        #     loc_f1 = (2 * loc_precision.mean() * loc_recall.mean()) / (loc_precision.mean() + loc_recall.mean() + evaluator.EPS)
+        #     self.log_dict({"rec_f1": rec_f1, "loc_f1": loc_f1}, prog_bar=True)
+        #     self.instance_post_process_data.clear()
 
     def test_step(self, batch, batch_idx):
         self.eval()

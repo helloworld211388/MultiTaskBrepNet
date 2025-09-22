@@ -475,6 +475,7 @@ class GraphAttnBias(nn.Module):
         d2_distance = d2_distance.reshape(-1, 64)
         d2_pos_bias = self.d2_pos_encoder(
             d2_distance)  # [n_graph, n_node, n_node, 64] -> [n_graph, n_node, n_node, n_head]
+        d2_pos_bias = self.d2_map_to_heads(d2_pos_bias)
         d2_pos_bias = d2_pos_bias.reshape(n_graph, n_node, n_node, self.num_heads)
         d2_pos_bias = d2_pos_bias.permute(0, 3, 1, 2)
         graph_attn_bias[:, :, 1:, 1:] += d2_pos_bias
@@ -484,6 +485,7 @@ class GraphAttnBias(nn.Module):
         ang_distance = ang_distance.reshape(-1, 64)
         ang_pos_bias = self.ang_pos_encoder(
             ang_distance)  # [n_graph, n_node, n_node, 64] -> [n_graph, n_node, n_node, n_head]
+        ang_pos_bias = self.ang_map_to_heads(ang_pos_bias)
         ang_pos_bias = ang_pos_bias.reshape(n_graph, n_node, n_node, self.num_heads)
         ang_pos_bias = ang_pos_bias.permute(0, 3, 1, 2)
         graph_attn_bias[:, :, 1:, 1:] += ang_pos_bias

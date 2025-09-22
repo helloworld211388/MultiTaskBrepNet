@@ -107,10 +107,11 @@ trainer = Trainer.from_argparse_args(
         str(results_path), name=month_day, version=hour_min_second,
     ),
     accelerator='gpu',
+    accumulate_grad_batches=4,
     devices=1,
     auto_select_gpus=True,
     gradient_clip_val=1.0,
-    precision=16, # 启用16位混合精度
+    precision=32, # 启用16位混合精度
     amp_backend='native' # 指定使用PyTorch原生AMP后端
 )
 
