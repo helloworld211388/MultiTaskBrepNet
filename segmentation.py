@@ -96,7 +96,7 @@ checkpoint_callback = ModelCheckpoint(
 early_stop_callback = EarlyStopping(
    monitor="eval_loss",   # 监控的指标，必须是在验证集上记录的
    min_delta=0.00001,        # 认为模型有提升的最小变化量
-   patience=10,           # 在停止前，允许指标不提升的epoch数
+   patience=50,           # 在停止前，允许指标不提升的epoch数
    verbose=True,         # 在终端打印早停信息
    mode="min"             # "min"表示监控的指标越小越好（如loss），"max"则相反（如F1分数）
 )
