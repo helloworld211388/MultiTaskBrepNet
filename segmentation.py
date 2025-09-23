@@ -4,9 +4,8 @@ import pathlib
 import time
 import torch
 
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from data.dataset import CADSynth
@@ -85,24 +84,28 @@ if not results_path.exists():
 # Define a path to save the results based date and time. E.g.
 month_day = time.strftime("%m%d")
 hour_min_second = time.strftime("%H%M%S")
-checkpoint_callback = ModelCheckpoint(
-    monitor="eval_loss",  # 监控验证集总损失
+
+# --- 修改开始: 移除 EarlyStopping 并设置新的 Checkpoint 逻辑 ---
+# Checkpoint to save the top-3 models with detailed metric names
+metric_checkpoint_callback = ModelCheckpoint(
+    monitor="eval_loss",
     dirpath=str(results_path.joinpath(month_day, hour_min_second)),
-    filename="best-{epoch}-{semantic_accuracy:.4f}-{instance_accuracy:.4f}",
+    filename="{epoch}-{instance_f1_score:.4f}-{semantic_accuracy:.4f}",
     save_top_k=3,
-    save_last=True,
+    mode="min"
 )
-# 新增：实例化EarlyStopping回调
-early_stop_callback = EarlyStopping(
-   monitor="eval_loss",   # 监控的指标，必须是在验证集上记录的
-   min_delta=0.00001,        # 认为模型有提升的最小变化量
-   patience=50,           # 在停止前，允许指标不提升的epoch数
-   verbose=True,         # 在终端打印早停信息
-   mode="min"             # "min"表示监控的指标越小越好（如loss），"max"则相反（如F1分数）
+# Checkpoint to save only the single best model with the name 'best'
+best_checkpoint_callback = ModelCheckpoint(
+    monitor="eval_loss",
+    dirpath=str(results_path.joinpath(month_day, hour_min_second)),
+    filename="best",
+    save_top_k=1,
+    mode="min"
 )
+
 trainer = Trainer.from_argparse_args(
     args,
-    callbacks=[checkpoint_callback, early_stop_callback],
+    callbacks=[best_checkpoint_callback, metric_checkpoint_callback],
     logger=TensorBoardLogger(
         str(results_path), name=month_day, version=hour_min_second,
     ),
@@ -114,6 +117,7 @@ trainer = Trainer.from_argparse_args(
     precision=32, # 启用16位混合精度
     amp_backend='native' # 指定使用PyTorch原生AMP后端
 )
+# --- 修改结束 ---
 
 if args.dataset == "cadsynth":
     Dataset = CADSynth
@@ -133,7 +137,7 @@ To monitor the logs, run:
 tensorboard --logdir results/{args.experiment_name}/{month_day}/{hour_min_second}
 
 The trained model with the best validation loss will be written to:
-results/{args.experiment_name}/{month_day}/{hour_min_second}/best-....ckpt
+results/{args.experiment_name}/{month_day}/{hour_min_second}/best.ckpt
 -----------------------------------------------------------------------------------
     """
     )
